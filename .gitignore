@@ -3,6 +3,8 @@ target/
 /PureEdgeSim/output/
 /PureEdgeSim/examples/*/output/*
 !/PureEdgeSim/examples/*/output/.gitkeep
+/PureEdgeSim/testbed/output/*
+!/PureEdgeSim/testbed/output/.gitkeep
 
 #Ignore IntelliJ IDEA project files
 .idea/

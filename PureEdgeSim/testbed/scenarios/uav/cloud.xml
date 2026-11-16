@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<cloud_data_centers>
+	<!-- The cloud data center: the top tier of the continuum, reached only through
+		the uplinks of the gateway edge servers. It has capacity to spare but is a
+		WAN round trip away, too far for the half second of the AR assistant.
+
+		A strategy can place a service on it as long as the server deciding can
+		still reach it: a group of a partition that holds no gateway, or whose
+		gateways lost their uplink, has no cloud. Its traits are set by
+		"cloud.traits" in testbed.properties. -->
+	<datacenter>
+		<idleConsumption>0</idleConsumption>
+		<maxConsumption>5776</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<cores>200</cores>
+		<mips>40000</mips>
+		<ram>256000</ram>
+		<storage>1000000</storage>
+	</datacenter>
+</cloud_data_centers>

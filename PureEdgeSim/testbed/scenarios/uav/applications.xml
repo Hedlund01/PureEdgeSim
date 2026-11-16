@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<applications>
+	<!-- The services of the UAV scenario, one per application, in this order:
+		service 0, 1 and 2 of testbed.properties. Each device type of
+		edge_devices.xml names its application; usage_percentage is kept because the
+		framework requires it. -->
+
+	<!-- UAVs: a video clip every ten seconds, as a pipeline of two stages. "detect"
+		is the heavy analysis of the clip. "track" runs on the edge too and takes the
+		detections as its input: with services.0.pipeline=edge in testbed.properties
+		the detections go from the host of "detect" to the host of "track" and never
+		back to the UAV. Only the track, a few kilobytes, returns to the UAV, which
+		steers by it (services.0.delivery=result). The latency of the application is
+		the deadline of the whole request. -->
+	<application name="Aerial video pipeline">
+		<type>Normal</type>
+		<rate>6</rate> <!-- requests per device per minute -->
+		<arrival>poisson</arrival>
+		<usage_percentage>30</usage_percentage>
+		<latency>3</latency> <!-- seconds, for the whole pipeline -->
+		<container_size>30000</container_size> <!-- kilobytes -->
+		<request_size>400</request_size> <!-- kilobytes -->
+		<results_size>5</results_size> <!-- kilobytes -->
+		<task_length>12000</task_length> <!-- million instructions -->
+		<subtask name="detect" task_length="12000" request_size="400" results_size="20" latency="2"/>
+		<subtask name="track" depends_on="detect" task_length="3000" request_size="1" results_size="3" latency="2"/>
+	</application>
+
+	<!-- Fixed sensors: a reading every five seconds, sent and forgotten
+		(services.1.delivery=fire_and_forget). -->
+	<application name="Sensor telemetry">
+		<type>Normal</type>
+		<rate>12</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>50</usage_percentage>
+		<latency>1</latency>
+		<container_size>2000</container_size>
+		<request_size>4</request_size>
+		<results_size>1</results_size>
+		<task_length>200</task_length>
+	</application>
+
+	<!-- Ground crews: augmented reality frames, answered within half a second. -->
+	<application name="AR assistant">
+		<type>Normal</type>
+		<rate>20</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>20</usage_percentage>
+		<latency>0.5</latency>
+		<container_size>20000</container_size>
+		<request_size>150</request_size>
+		<results_size>30</results_size>
+		<task_length>3000</task_length>
+	</application>
+</applications>

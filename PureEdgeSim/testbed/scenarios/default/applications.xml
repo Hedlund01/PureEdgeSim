@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<applications>
+	<!-- The services the end devices call. Each device type of edge_devices.xml
+		names its application, so usage_percentage is not used to assign them; it is
+		kept because the framework requires it, and set to the share of the device
+		type that runs the application.
+
+		Each application is one service that the strategy under test deploys on the
+		edge servers or the cloud, in this order: the first is service 0, the second
+		service 1, and so on, as "services.<n>.traits" of testbed.properties counts
+		them.
+
+		Every request is stateless: it carries all it needs, and any edge server
+		running the service, or the cloud, can answer it. So a device can be served
+		by whichever server its own partition group still reaches, and a request lost
+		with a link costs that request only. -->
+
+	<!-- Security cameras: a clip every ten seconds, analysed for objects. Heavy
+		upload, heavy compute, a two second budget. -->
+	<application name="Video analytics">
+		<type>Normal</type>
+		<rate>6</rate> <!-- requests per device per minute -->
+		<arrival>poisson</arrival>
+		<usage_percentage>25</usage_percentage>
+		<latency>2</latency> <!-- seconds -->
+		<container_size>30000</container_size> <!-- kilobytes -->
+		<request_size>400</request_size> <!-- kilobytes -->
+		<results_size>5</results_size> <!-- kilobytes -->
+		<task_length>15000</task_length> <!-- million instructions -->
+	</application>
+
+	<!-- IoT sensors: a reading every five seconds, aggregated and checked for
+		anomalies. Tiny requests, a one second budget. -->
+	<application name="Sensor telemetry">
+		<type>Normal</type>
+		<rate>12</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>40</usage_percentage>
+		<latency>1</latency>
+		<container_size>2000</container_size>
+		<request_size>4</request_size>
+		<results_size>1</results_size>
+		<task_length>200</task_length>
+	</application>
+
+	<!-- Smartphones: augmented reality frames to recognise, with a half second
+		budget that only a nearby server can meet. -->
+	<application name="AR assistant">
+		<type>Normal</type>
+		<rate>20</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>25</usage_percentage>
+		<latency>0.5</latency>
+		<container_size>20000</container_size>
+		<request_size>150</request_size>
+		<results_size>30</results_size>
+		<task_length>3000</task_length>
+	</application>
+
+	<!-- Payment terminals: card authorisations. Few requests, a three second
+		budget. -->
+	<application name="Payment authorization">
+		<type>Normal</type>
+		<rate>2</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>10</usage_percentage>
+		<latency>3</latency>
+		<container_size>8000</container_size>
+		<request_size>8</request_size>
+		<results_size>2</results_size>
+		<task_length>1500</task_length>
+	</application>
+</applications>

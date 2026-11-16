@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<edge_devices>
+	<!-- The end devices of the convoy scenario. Each type runs the application its
+		"application" attribute names. A device starts within "devices.radius_m" of
+		an edge server and is attached to it; it attaches to the nearest server in
+		"devices.radio_range_m" when it or the server moves out of range, and is cut
+		off while there is none. -->
+
+	<!-- Scout UAVs flying ahead of the convoy at 18 m/s, by random waypoints. -->
+	<device name="Scout UAV" application="Reconnaissance pipeline">
+		<connectivity>wifi</connectivity>
+		<mobility>true</mobility>
+		<speed>18</speed> <!-- metres per second -->
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>10</maxPauseDuration>
+		<minMobilityDuration>60</minMobilityDuration>
+		<maxMobilityDuration>240</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>35</percentage>
+		<batteryCapacity>200</batteryCapacity> <!-- Wh -->
+		<initialBatteryLevel>100</initialBatteryLevel>
+		<idleConsumption>2</idleConsumption>
+		<maxConsumption>10</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>4</cores>
+		<mips>8000</mips>
+		<ram>4000</ram>
+		<storage>32000</storage>
+	</device>
+
+	<!-- Mapping UAVs sweeping the area at 10 m/s on a smoother course. -->
+	<device name="Mapping UAV" application="Terrain mapping">
+		<connectivity>wifi</connectivity>
+		<mobility model="gauss-markov">true</mobility>
+		<speed>10</speed> <!-- metres per second -->
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>60</minMobilityDuration>
+		<maxMobilityDuration>240</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>25</percentage>
+		<batteryCapacity>200</batteryCapacity> <!-- Wh -->
+		<initialBatteryLevel>100</initialBatteryLevel>
+		<idleConsumption>2</idleConsumption>
+		<maxConsumption>10</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>4</cores>
+		<mips>8000</mips>
+		<ram>4000</ram>
+		<storage>32000</storage>
+	</device>
+
+	<!-- Fixed, battery powered ground sensors with no processor. -->
+	<device name="Ground sensor" application="Sensor telemetry">
+		<connectivity>cellular</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>40</percentage>
+		<batteryCapacity>18.5</batteryCapacity>
+		<initialBatteryLevel>90</initialBatteryLevel>
+		<idleConsumption>0.02</idleConsumption>
+		<maxConsumption>0.3</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>0</cores>
+		<mips>0</mips>
+		<ram>64</ram>
+		<storage>0</storage>
+	</device>
+</edge_devices>

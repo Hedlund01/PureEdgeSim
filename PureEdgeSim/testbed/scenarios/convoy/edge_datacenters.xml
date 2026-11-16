@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<edge_datacenters>
+	<!-- The edge servers of the continuum: the middle tier, between the end devices
+		and the cloud data center. Every one of them runs the strategy under test.
+
+		This is a template: TestbedNodesGenerator draws "edge_nodes" servers from it
+		(see testbed.properties), names them dc1 to dcN, places them uniformly on the
+		map, and gives each its role: access server (devices attach to it), gateway
+		(it has an uplink to the cloud), or neither. The location below is replaced
+		for every server, and the periphery flag by the access role.
+
+		The hardware is drawn per server, so the edge layer is heterogeneous: from a
+		small box in a street cabinet (4 cores, 8 GB) to a rack server in a local
+		exchange (16 cores, 32 GB). The memory is what Flocky deployments are reserved
+		against, up to the share "deployment.memory_share" of flocky.properties; the
+		cores and the mips run the requests. -->
+	<datacenter name="Edge server">
+		<periphery>true</periphery>
+		<idleConsumption>40</idleConsumption>
+		<maxConsumption>120</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<location>
+			<x_pos>1</x_pos>
+			<y_pos>1</y_pos>
+		</location>
+		<cores distribution="uniform" min="4" max="16"/>
+		<mips distribution="uniform" min="15000" max="30000"/>
+		<ram distribution="uniform" min="8000" max="32000"/>
+		<storage>200000</storage>
+	</datacenter>
+	<network_links>
+		<!-- No links here: TestbedTopologyCreator builds the mesh from the "mesh.*"
+			keys of testbed.properties. -->
+	</network_links>
+</edge_datacenters>

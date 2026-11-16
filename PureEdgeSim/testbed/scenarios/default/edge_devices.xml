@@ -1,0 +1,109 @@
+<?xml version="1.0"?>
+<edge_devices>
+	<!-- The end devices of the continuum: the bottom tier, under the edge servers
+		and the cloud data center. Each type is named by its "name" attribute and runs
+		the application of applications.xml that its "application" attribute names,
+		so every device of a type calls the same service. The percentages set the mix
+		of the fleet; the usage_percentage of applications.xml is not used.
+
+		Each device is placed within "devices.radius_m" of an access edge server (see
+		testbed.properties) and attached to it: that server orchestrates for it, and
+		the device is in the partition group of that server. The devices do not move,
+		so a device never changes group in the middle of a partition.
+
+		IoT sensors have no processor (zero cores), which makes them pure sensors in
+		PureEdgeSim: they only produce requests and are never a destination. -->
+
+	<!-- Battery powered environmental sensors on a cellular IoT network, reporting
+		temperature, air quality and vibration. -->
+	<device name="IoT sensor" application="Sensor telemetry">
+		<connectivity>cellular</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>40</percentage>
+		<batteryCapacity>18.5</batteryCapacity> <!-- Wh: a 5000 mAh cell at 3.7 V -->
+		<initialBatteryLevel>90</initialBatteryLevel>
+		<idleConsumption>0.02</idleConsumption>
+		<maxConsumption>0.3</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>0</cores>
+		<mips>0</mips>
+		<ram>64</ram>
+		<storage>0</storage>
+	</device>
+
+	<!-- Wired, mains powered security cameras streaming clips for analysis. -->
+	<device name="Security camera" application="Video analytics">
+		<connectivity>ethernet</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>false</battery>
+		<percentage>25</percentage>
+		<batteryCapacity>0</batteryCapacity>
+		<initialBatteryLevel>0</initialBatteryLevel>
+		<idleConsumption>3</idleConsumption>
+		<maxConsumption>8</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>2</cores>
+		<mips>2000</mips>
+		<ram>1000</ram>
+		<storage>32000</storage>
+	</device>
+
+	<!-- Smartphones on wifi running an augmented reality assistant. -->
+	<device name="Smartphone" application="AR assistant">
+		<connectivity>wifi</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>25</percentage>
+		<batteryCapacity>15</batteryCapacity> <!-- Wh -->
+		<initialBatteryLevel>80</initialBatteryLevel>
+		<idleConsumption>0.5</idleConsumption>
+		<maxConsumption>5</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>8</cores>
+		<mips>10000</mips>
+		<ram>6000</ram>
+		<storage>64000</storage>
+	</device>
+
+	<!-- Wired payment terminals in shops. -->
+	<device name="Payment terminal" application="Payment authorization">
+		<connectivity>ethernet</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>false</battery>
+		<percentage>10</percentage>
+		<batteryCapacity>0</batteryCapacity>
+		<initialBatteryLevel>0</initialBatteryLevel>
+		<idleConsumption>2</idleConsumption>
+		<maxConsumption>4</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>1</cores>
+		<mips>1000</mips>
+		<ram>512</ram>
+		<storage>4000</storage>
+	</device>
+</edge_devices>

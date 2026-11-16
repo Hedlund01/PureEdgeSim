@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<edge_devices>
+	<!-- The end devices of the UAV scenario. Each type runs the application its
+		"application" attribute names. A device starts within "devices.radius_m" of
+		an access edge server and is attached to it; one that moves attaches to the
+		nearest access server in "devices.radio_range_m" when it leaves the range of
+		the one it had, and is cut off while there is none. -->
+
+	<!-- UAVs flying over the district at 15 m/s, offloading their video. -->
+	<device name="UAV" application="Aerial video pipeline">
+		<connectivity>wifi</connectivity>
+		<mobility>true</mobility>
+		<speed>15</speed> <!-- metres per second -->
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>20</maxPauseDuration>
+		<minMobilityDuration>60</minMobilityDuration>
+		<maxMobilityDuration>240</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>30</percentage>
+		<batteryCapacity>200</batteryCapacity> <!-- Wh -->
+		<initialBatteryLevel>100</initialBatteryLevel>
+		<idleConsumption>2</idleConsumption>
+		<maxConsumption>10</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>4</cores>
+		<mips>8000</mips>
+		<ram>4000</ram>
+		<storage>32000</storage>
+	</device>
+
+	<!-- Fixed, battery powered environmental sensors with no processor. -->
+	<device name="IoT sensor" application="Sensor telemetry">
+		<connectivity>cellular</connectivity>
+		<mobility>false</mobility>
+		<speed>0</speed>
+		<minPauseDuration>0</minPauseDuration>
+		<maxPauseDuration>0</maxPauseDuration>
+		<minMobilityDuration>0</minMobilityDuration>
+		<maxMobilityDuration>0</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>50</percentage>
+		<batteryCapacity>18.5</batteryCapacity>
+		<initialBatteryLevel>90</initialBatteryLevel>
+		<idleConsumption>0.02</idleConsumption>
+		<maxConsumption>0.3</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>0</cores>
+		<mips>0</mips>
+		<ram>64</ram>
+		<storage>0</storage>
+	</device>
+
+	<!-- Ground crews on foot with a handset running an AR assistant. -->
+	<device name="Ground crew" application="AR assistant">
+		<connectivity>wifi</connectivity>
+		<mobility>true</mobility>
+		<speed>1.5</speed>
+		<minPauseDuration>10</minPauseDuration>
+		<maxPauseDuration>120</maxPauseDuration>
+		<minMobilityDuration>30</minMobilityDuration>
+		<maxMobilityDuration>300</maxMobilityDuration>
+		<battery>true</battery>
+		<percentage>20</percentage>
+		<batteryCapacity>15</batteryCapacity>
+		<initialBatteryLevel>80</initialBatteryLevel>
+		<idleConsumption>0.5</idleConsumption>
+		<maxConsumption>5</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<cores>8</cores>
+		<mips>10000</mips>
+		<ram>6000</ram>
+		<storage>64000</storage>
+	</device>
+</edge_devices>

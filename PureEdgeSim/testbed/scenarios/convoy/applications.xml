@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<applications>
+	<!-- The services of the convoy scenario, one per application, in this order:
+		service 0, 1 and 2 of testbed.properties. Each device type of
+		edge_devices.xml names its application; usage_percentage is kept because the
+		framework requires it. -->
+
+	<!-- Scout UAVs: a clip every six seconds through three stages on the edge
+		(services.0.pipeline=edge). "detect" analyses the clip, "fuse" merges the
+		detections with what the edge already knows, and "advise" turns that into a
+		short route advice: the only thing that returns to the UAV
+		(services.0.delivery=result). The latency of the application is the deadline
+		of the whole request. -->
+	<application name="Reconnaissance pipeline">
+		<type>Normal</type>
+		<rate>10</rate> <!-- requests per device per minute -->
+		<arrival>poisson</arrival>
+		<usage_percentage>35</usage_percentage>
+		<latency>3</latency> <!-- seconds, for the whole pipeline -->
+		<container_size>30000</container_size> <!-- kilobytes -->
+		<request_size>300</request_size> <!-- kilobytes -->
+		<results_size>2</results_size> <!-- kilobytes -->
+		<task_length>10000</task_length> <!-- million instructions -->
+		<subtask name="detect" task_length="10000" request_size="300" results_size="15" latency="2"/>
+		<subtask name="fuse" depends_on="detect" task_length="2500" request_size="1" results_size="5" latency="2"/>
+		<subtask name="advise" depends_on="fuse" task_length="800" request_size="1" results_size="2" latency="2"/>
+	</application>
+
+	<!-- Mapping UAVs: a large clip every fifteen seconds, stitched and then indexed
+		on the edge (services.1.pipeline=edge). Nothing comes back to the UAV
+		(services.1.delivery=fire_and_forget): the map is for the edge. -->
+	<application name="Terrain mapping">
+		<type>Normal</type>
+		<rate>4</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>25</usage_percentage>
+		<latency>6</latency>
+		<container_size>40000</container_size>
+		<request_size>900</request_size>
+		<results_size>50</results_size>
+		<task_length>18000</task_length>
+		<subtask name="stitch" task_length="18000" request_size="900" results_size="120" latency="4"/>
+		<subtask name="index" depends_on="stitch" task_length="4000" request_size="1" results_size="1" latency="4"/>
+	</application>
+
+	<!-- Ground sensors: a reading every five seconds, sent and forgotten
+		(services.2.delivery=fire_and_forget). -->
+	<application name="Sensor telemetry">
+		<type>Normal</type>
+		<rate>12</rate>
+		<arrival>poisson</arrival>
+		<usage_percentage>40</usage_percentage>
+		<latency>1</latency>
+		<container_size>2000</container_size>
+		<request_size>4</request_size>
+		<results_size>1</results_size>
+		<task_length>200</task_length>
+	</application>
+</applications>
