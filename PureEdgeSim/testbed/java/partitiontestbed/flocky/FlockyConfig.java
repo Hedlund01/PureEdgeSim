@@ -22,8 +22,6 @@ public class FlockyConfig extends PropertiesFile {
 	// OAM catalog
 	public final int implementationsPerService;
 	public final double unikernelProbability;
-	public final double minDefinitionMemory;
-	public final double maxDefinitionMemory;
 	public final int seedNodesPerDefinition;
 
 	// Discovery
@@ -33,6 +31,8 @@ public class FlockyConfig extends PropertiesFile {
 	public final int bootstrapPeers;
 	public final double discoveryTimeout;
 	public final double forgetAfter;
+	/** Whether a node of another partition group that comes in range is admitted. */
+	public final boolean admitJoining;
 
 	// Repository
 	public final double repositoryInterval;
@@ -66,8 +66,6 @@ public class FlockyConfig extends PropertiesFile {
 		super(PREFIX, defaultFile);
 		implementationsPerService = integer("oam.implementations_per_service", 1, 100);
 		unikernelProbability = number("oam.unikernel_probability", 0, 1);
-		minDefinitionMemory = number("oam.min_memory_mb", 0, Double.MAX_VALUE);
-		maxDefinitionMemory = number("oam.max_memory_mb", minDefinitionMemory, Double.MAX_VALUE);
 		// "all" installs every definition on every server, so any server can run any
 		// service from the start, whichever group a partition puts it in.
 		seedNodesPerDefinition = "all".equalsIgnoreCase(properties.getProperty("oam.seed_nodes_per_definition", "").trim())
@@ -80,6 +78,7 @@ public class FlockyConfig extends PropertiesFile {
 		bootstrapPeers = integer("discovery.bootstrap_peers", 1, edgeServers - 1);
 		discoveryTimeout = millis("discovery.rpc_timeout_ms");
 		forgetAfter = number("discovery.forget_after_s", 0, Double.MAX_VALUE);
+		admitJoining = bool("discovery.admit_joining", true);
 
 		repositoryInterval = number("repository.interval_s", 0.01, Double.MAX_VALUE);
 

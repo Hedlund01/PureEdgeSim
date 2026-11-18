@@ -20,7 +20,12 @@ import com.mechalikh.pureedgesim.simulationmanager.SimLog;
 import com.mechalikh.pureedgesim.simulationmanager.Simulation;
 import com.mechalikh.pureedgesim.simulationmanager.SimulationAbstract;
 
+import partitiontestbed.baselines.AccessServerStrategy;
+import partitiontestbed.baselines.CloudOnlyStrategy;
+import partitiontestbed.baselines.ReplicatedStrategy;
+import partitiontestbed.baselines.RetryStrategy;
 import partitiontestbed.flocky.FlockyStrategy;
+import partitiontestbed.mvtora.MvtoraStrategy;
 
 /**
  * A testbed for decentralised orchestration on an edge-to-cloud continuum that
@@ -34,12 +39,12 @@ import partitiontestbed.flocky.FlockyStrategy;
  * one of which keeps the cloud. The devices keep sending tasks throughout, and
  * every task is counted: where it ran, how long it took, and why it failed.
  * <p>
- * What decides where the tasks run is the {@link PlacementStrategy} under test,
+ * What decides where the tasks run is the {@link OrchestrationStrategy} under test,
  * selected by {@code orchestration_algorithms} in
  * {@code simulation_parameters.properties}. One run can sweep several of them, and
  * every one faces the same continuum, the same failures and the same partitions.
  * The strategies known to the testbed are registered here; a new one is a class
- * implementing {@link PlacementStrategy} and one more line in
+ * implementing {@link OrchestrationStrategy} and one more line in
  * {@link #registerDefaults()}.
  * <p>
  * The sweep is run {@code replications} times. A replication has its own
@@ -83,7 +88,7 @@ public class Testbed {
 	public static final String SIMULATION_PREFIX = "simulation.";
 	private static final String OUTPUT = "PureEdgeSim/testbed/output/";
 
-	private static final Map<String, Supplier<PlacementStrategy>> STRATEGIES = new TreeMap<>();
+	private static final Map<String, Supplier<OrchestrationStrategy>> STRATEGIES = new TreeMap<>();
 
 	/** Two-sided 95% quantiles of Student's t, by degrees of freedom from 1. */
 	private static final double[] T95 = { 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
@@ -102,6 +107,11 @@ public class Testbed {
 	private static void registerDefaults() {
 		register("FLOCKY_LATENCY", () -> new FlockyStrategy(false));
 		register("FLOCKY_SCORED", () -> new FlockyStrategy(true));
+		register(AccessServerStrategy.NAME, AccessServerStrategy::new);
+		register(CloudOnlyStrategy.NAME, CloudOnlyStrategy::new);
+		register(RetryStrategy.NAME, RetryStrategy::new);
+		register(ReplicatedStrategy.NAME, ReplicatedStrategy::new);
+		register(MvtoraStrategy.NAME, MvtoraStrategy::new);
 	}
 
 	/**
@@ -111,7 +121,7 @@ public class Testbed {
 	 * @param algorithm the name, as written in {@code simulation_parameters.properties}
 	 * @param factory   creates a fresh strategy for every iteration
 	 */
-	public static synchronized void register(String algorithm, Supplier<PlacementStrategy> factory) {
+	public static synchronized void register(String algorithm, Supplier<OrchestrationStrategy> factory) {
 		STRATEGIES.put(algorithm, factory);
 	}
 
@@ -120,8 +130,8 @@ public class Testbed {
 	 * @return a fresh strategy for it
 	 * @throws IllegalArgumentException when no strategy has that name
 	 */
-	static synchronized PlacementStrategy strategy(String algorithm) {
-		Supplier<PlacementStrategy> factory = STRATEGIES.get(algorithm);
+	static synchronized OrchestrationStrategy strategy(String algorithm) {
+		Supplier<OrchestrationStrategy> factory = STRATEGIES.get(algorithm);
 		if (factory == null)
 			throw new IllegalArgumentException("Testbed - unknown orchestration algorithm \"" + algorithm
 					+ "\", expected one of " + STRATEGIES.keySet());
@@ -265,6 +275,12 @@ public class Testbed {
 		try {
 			TestbedMetrics.write(Path.of(outputFolder, "testbed_summary.csv"),
 					"algorithm,devices,delivery,metric,runs,mean,std,ci95_low,ci95_high", rows);
+			List<String> header = new ArrayList<>(List.of("algorithm", "devices", "delivery", "runs"));
+			for (String kpi : KPIS) {
+				header.add(kpi);
+				header.add(kpi + "_ci95");
+			}
+			TestbedMetrics.write(Path.of(outputFolder, "testbed_kpis.csv"), String.join(",", header), kpiRows());
 		} catch (IOException e) {
 			SimLog.println("Testbed - cannot write the summary: %s", e.getMessage());
 		}
@@ -272,6 +288,29 @@ public class Testbed {
 			String[] name = scenario.split(",");
 			SimLog.println("Testbed - %s, %s devices, %s, over %d run(s): %s", name[0], name[1], name[2],
 					RESULTS.get(scenario).size(), describe(scenario));
+		}
+		return rows;
+	}
+
+	/**
+	 * The figures every algorithm is compared on in {@code testbed_kpis.csv}, one
+	 * column each, with the half width of its 95% confidence interval.
+	 */
+	static final List<String> KPIS = List.of("requirement_met_pct", "requirement_met_partitioned_pct",
+			"deadline_met_pct", "lossless_met_pct", "on_time_pct", "late_pct", "lost_pct", "delay_p50_ms",
+			"delay_p95_ms", "attempts_per_task", "redundant_runs_pct", "instances_started",
+			"instance_memory_mb_per_server", "control_kbps_per_server");
+
+	/** One row per algorithm: its mean over the runs and the half width of the interval, KPI by KPI. */
+	private static List<String> kpiRows() {
+		List<String> rows = new ArrayList<>();
+		for (Map.Entry<String, List<Map<String, Double>>> scenario : RESULTS.entrySet()) {
+			StringBuilder row = new StringBuilder(scenario.getKey()).append(',').append(scenario.getValue().size());
+			for (String kpi : KPIS) {
+				double[] stats = statistics(scenario.getValue(), kpi);
+				row.append(',').append(cell(stats[1])).append(',').append(cell(stats[3]));
+			}
+			rows.add(row.toString());
 		}
 		return rows;
 	}
@@ -294,7 +333,8 @@ public class Testbed {
 
 	private static String describe(String scenario) {
 		StringBuilder text = new StringBuilder();
-		for (String metric : List.of("success_pct", "success_partitioned_pct", "delay_p50_ms", "delay_p95_ms")) {
+		for (String metric : List.of("requirement_met_pct", "requirement_met_partitioned_pct", "lost_pct",
+				"delay_p95_ms")) {
 			double[] stats = statistics(RESULTS.get(scenario), metric);
 			text.append(text.length() == 0 ? "" : ", ").append(metric).append(' ').append(cell(stats[1]));
 			if (!Double.isNaN(stats[3]))

@@ -14,6 +14,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +28,10 @@ import com.mechalikh.pureedgesim.network.NetworkLink;
 import com.mechalikh.pureedgesim.simulationmanager.Simulation;
 import com.mechalikh.pureedgesim.simulationmanager.SimulationAbstract;
 
+import partitiontestbed.baselines.AccessServerStrategy;
+import partitiontestbed.baselines.CloudOnlyStrategy;
+import partitiontestbed.baselines.RetryStrategy;
+
 /**
  * Tests what lets one run hold a whole scenario: delivery modes per service,
  * devices that attach to another access server, the hooks a strategy has for
@@ -34,6 +40,7 @@ import com.mechalikh.pureedgesim.simulationmanager.SimulationAbstract;
 class TestbedScenariosTest extends TestbedTestSupport {
 
 	private static final String ACCESS = AccessServerStrategy.NAME;
+	private static final String RETRY = RetryStrategy.NAME;
 	private static final String UAV_SETTINGS = "PureEdgeSim/testbed/scenarios/uav/";
 	private static final int UAV_DEVICES = 30;
 	private static final String CONVOY_SETTINGS = "PureEdgeSim/testbed/scenarios/convoy/";
@@ -41,8 +48,7 @@ class TestbedScenariosTest extends TestbedTestSupport {
 
 	@BeforeEach
 	void registerTheTestStrategies() {
-		AccessServerStrategy.register();
-		RoutingStrategies.register();
+		GroupStrategies.register();
 	}
 
 	// ------------------------------------------------------------ scenarios
@@ -80,7 +86,7 @@ class TestbedScenariosTest extends TestbedTestSupport {
 		List<String> parameters = Files.readAllLines(Testbed.simulationParameters(Testbed.settingsFolder()));
 		assertTrue(parameters.contains("simulation_time=12"), "the duration is the scenario's");
 		assertTrue(parameters.contains("wan_bandwidth=200"), "the network of the framework is common");
-		assertTrue(parameters.contains("orchestration_algorithms=FLOCKY_LATENCY,FLOCKY_SCORED"));
+		assertTrue(parameters.contains("orchestration_algorithms=FLOCKY_LATENCY,FLOCKY_SCORED,MVTORA"));
 
 		testbed("mesh.base_latency_ms", "2");
 		System.setProperty("simulation.simulation_time", "5");
@@ -139,22 +145,17 @@ class TestbedScenariosTest extends TestbedTestSupport {
 	void oneRunMixesTasksThatReturnAResultAndTasksThatDoNot() throws Exception {
 		testbed("partition.1.enabled", "false");
 		testbed("services.1.delivery", "fire_and_forget");
+		testbed("services.1.requirement", "lossless");
 		labelDelivery = "mixed";
 		String console = run(ACCESS);
 
 		assertTrue(console.contains("delivery set per service"));
-		double sensors = 0;
-		double others = 0;
 		for (Map<String, String> type : rows(ACCESS, "device_types")) {
-			double tasks = number(type, "tasks_ok") + number(type, "tasks_failed");
-			if ("IoT sensor".equals(type.get("device_type")))
-				sensors += tasks;
-			else
-				others += tasks;
+			assertTrue(number(type, "tasks") > 0, type.get("device_type") + " sends tasks");
+			assertEquals("IoT sensor".equals(type.get("device_type")) ? "lossless" : "deadline", type.get("requirement"),
+					"each service is judged by its own requirement");
 		}
-		assertTrue(sensors > 0 && others > 0);
-		assertEquals(others, reported(console, "results reached their device"), 1e-9,
-				"every task brings its result back, except the telemetry of the sensors");
+		assertTrue(console.contains("Sensor telemetry         lossless"), "and the report says which");
 	}
 
 	// ------------------------------------------------------------- fairness
@@ -179,46 +180,28 @@ class TestbedScenariosTest extends TestbedTestSupport {
 		testbed("failures.node_mean_repair_s", "20");
 		testbed("devices.radio_range_m", "1500");
 		String moving = run(ACCESS);
-		int failedWhenMoving = reported(moving, "failed \\(");
 		testbed("devices.failover", "false");
 		String waiting = run(ACCESS);
 
 		assertTrue(reported(moving, "devices attached to another access server") > 0);
 		assertEquals(0, reported(waiting, "devices attached to another access server"),
 				"without failover a device waits for its server");
-		assertTrue(failedWhenMoving < reported(waiting, "failed \\("),
+		assertTrue(percent(moving, "lost") < percent(waiting, "lost"),
 				"a device that finds another server loses fewer tasks");
 	}
 
-	// ---------------------------------------------------------------- hooks
+	// ---------------------------------------------------------- strategies
 
 	@Test
 	@Tag("integration")
 	void aStrategyCanSendEveryTaskWhereItWants() throws Exception {
 		testbed("partition.1.enabled", "false");
-		run(RoutingStrategies.TO_CLOUD);
+		run(CloudOnlyStrategy.NAME);
 
-		for (Map<String, String> type : rows(RoutingStrategies.TO_CLOUD, "device_types")) {
-			assertTrue(number(type, "tasks_ok") > 0);
-			assertEquals(number(type, "tasks_ok"), number(type, "served_by_cloud"), 1e-9,
-					"the service is placed on the access server, and every task routed to the cloud");
+		for (Map<String, String> type : rows(CloudOnlyStrategy.NAME, "device_types")) {
+			assertTrue(number(type, "done_on_cloud") > 0);
+			assertEquals(0, number(type, "done_on_edge"), 1e-9, "every task runs on the cloud");
 		}
-	}
-
-	@Test
-	@Tag("integration")
-	void aStrategyDecidesWhetherAFailedTaskEndsThePlacement() throws Exception {
-		testbed("partition.1.enabled", "false");
-		testbed("devices.failover", "false");
-		testbed("failures.node_failure_rate_per_hour", "30");
-		testbed("failures.node_mean_repair_s", "20");
-		run(ACCESS);
-		run(RoutingStrategies.KEEP);
-
-		assertTrue(rows(ACCESS, "deployments").size() > DEVICES,
-				"by default a failed task ends the placement, and the next one deploys again");
-		assertEquals(DEVICES, rows(RoutingStrategies.KEEP, "deployments").size(),
-				"a strategy that keeps it deploys once per device");
 	}
 
 	// ------------------------------------------------- pipeline and mobility
@@ -265,37 +248,129 @@ class TestbedScenariosTest extends TestbedTestSupport {
 		for (int replication = 0; replication < 2; replication++) {
 			Map<String, String> uavs = rows(output.resolve(label + replication + "_device_types.csv")).get(0);
 			assertEquals("UAV", uavs.get("device_type"));
-			assertTrue(number(uavs, "tasks_ok") > 0, "the pipeline runs");
-			tracks += number(uavs, "tasks_ok");
+			assertTrue(number(uavs, "requirement_met_pct") > 0, "the pipeline runs");
+			List<Map<String, String>> tasks = rows(output.resolve(label + replication + "_tasks.csv"));
+			for (String stage : List.of("detect", "track"))
+				assertTrue(tasks.stream().anyMatch(row -> stage.equals(row.get("stage")) && !row.get("done_s").isEmpty()),
+						"its " + stage + " stage is done on the edge");
+			tracks += tasks.stream().filter(row -> "track".equals(row.get("stage"))).count();
 			List<Map<String, String>> timeline = rows(output.resolve(label + replication + "_timeline.csv"));
 			assertTrue(number(timeline.get(timeline.size() - 1), "handovers") > 0,
 					"devices that move attach to other access servers");
 		}
-		// Of the two stages of the pipeline only the last returns something to the UAV.
-		List<String> results = console.lines().filter(line -> line.contains("results reached their device"))
-				.collect(Collectors.toList());
-		assertEquals(2, results.size(), "one report per replication");
-		double returned = results.stream().mapToInt(line -> reported(line, "results reached their device")).sum();
-		double crews = 0;
-		for (int replication = 0; replication < 2; replication++) {
-			Map<String, String> crew = rows(output.resolve(label + replication + "_device_types.csv")).get(2);
-			crews += number(crew, "tasks_ok") + number(crew, "tasks_failed");
-		}
-		assertTrue(returned > 0 && returned < crews + tracks,
-				"the detections stay on the edge: fewer results return than tasks succeed");
+		assertTrue(tracks > 0, "the detections feed the tracking stage on the edge");
 
-		assertTrue(summary.stream().anyMatch(row -> row.startsWith(ACCESS + "," + UAV_DEVICES + ",mixed,success_pct,2,")),
+		assertTrue(summary.stream()
+				.anyMatch(row -> row.startsWith(ACCESS + "," + UAV_DEVICES + ",mixed,requirement_met_pct,2,")),
 				"the summary averages the two replications: " + summary);
 		assertTrue(Files.exists(output.resolve("testbed_summary.csv")));
+		assertTrue(Files.readAllLines(output.resolve("testbed_kpis.csv")).get(0).startsWith(
+				"algorithm,devices,delivery,runs,requirement_met_pct,requirement_met_pct_ci95"),
+				"and the KPI table has one column per KPI, the same for every algorithm");
 	}
 
 	@Test
 	@Tag("integration")
 	void theConvoyScenarioKeepsServingWhileMostOfItsEdgeServersMove() throws Exception {
 		Path output = Path.of(TEST_OUTPUT, "convoy");
+		String console = runConvoy(ACCESS, output);
+		assertFalse(console.contains("unexpected error"), console);
+
+		String label = "testbed_" + ACCESS + "_" + CONVOY_DEVICES + "_devices_mixed";
+		List<Map<String, String>> types = rows(output.resolve(label + "_device_types.csv"));
+		assertEquals(List.of("Scout UAV", "Mapping UAV", "Ground sensor"),
+				types.stream().map(row -> row.get("device_type")).collect(Collectors.toList()));
+		for (Map<String, String> type : types)
+			assertTrue(number(type, "requirement_met_pct") > 0, type.get("device_type") + " is served");
+		List<Map<String, String>> tasks = rows(output.resolve(label + "_tasks.csv"));
+		for (String stage : List.of("detect", "fuse", "advise", "stitch", "index"))
+			assertTrue(tasks.stream().anyMatch(row -> stage.equals(row.get("stage"))), "the " + stage + " stage runs");
+		assertEquals("lossless", types.get(1).get("requirement"), "the map must not be lost");
+		for (Map<String, String> group : rows(output.resolve(label + "_partitions.csv")))
+			assertEquals(0, number(group, "access_nodes_with_cloud"), "no group keeps the cloud");
+		List<Map<String, String>> timeline = rows(output.resolve(label + "_timeline.csv"));
+		assertTrue(number(timeline.get(timeline.size() - 1), "handovers") > 0,
+				"devices follow the servers that move");
+	}
+
+	@Test
+	@Tag("integration")
+	void aServerThatDriftsAwayFromItsGroupJoinsTheGroupItReachesAndNoPathCrossesTwoGroups() throws Exception {
+		Path output = Path.of(TEST_OUTPUT, "convoy-open");
+		String console = runConvoy(GroupStrategies.OPEN, output);
+		assertFalse(console.contains("unexpected error"), console);
+
+		List<Map<String, String>> groups = rows(output.resolve(convoyLabel(GroupStrategies.OPEN) + "_partitions.csv"));
+		double serversJoined = groups.stream().mapToDouble(group -> number(group, "servers_joined")).sum();
+		double serversLeft = groups.stream().mapToDouble(group -> number(group, "servers_left")).sum();
+		double devicesJoined = groups.stream().mapToDouble(group -> number(group, "devices_joined")).sum();
+		double devicesLeft = groups.stream().mapToDouble(group -> number(group, "devices_left")).sum();
+		assertTrue(serversJoined > 0, "vehicles change group: " + groups);
+		assertEquals(serversJoined, serversLeft, "every server that joins a group left another");
+		assertTrue(devicesJoined > 0, "devices follow: " + groups);
+		assertEquals(devicesJoined, devicesLeft, "every device that joins a group left another");
+		assertTrue(console.contains("left group"), "the run reports each server that changes group");
+		assertTrue(GroupStrategies.asked >= serversJoined + devicesJoined, "the strategy was asked every time");
+		assertEquals(0, GroupStrategies.crossings, "no path joins two servers of different groups as they are now");
+	}
+
+	@Test
+	@Tag("integration")
+	void aStrategyThatAdmitsNoOneKeepsEveryNodeInItsGroup() throws Exception {
+		Path output = Path.of(TEST_OUTPUT, "convoy-closed");
+		String console = runConvoy(GroupStrategies.CLOSED, output);
+		assertFalse(console.contains("unexpected error"), console);
+
+		for (Map<String, String> group : rows(output.resolve(convoyLabel(GroupStrategies.CLOSED) + "_partitions.csv")))
+			for (String column : List.of("servers_joined", "servers_left", "devices_joined", "devices_left"))
+				assertEquals(0, number(group, column), column + " of " + group);
+		Matcher refused = Pattern.compile("changed partition group, (\\d+) joins refused").matcher(console);
+		assertTrue(refused.find() && Integer.parseInt(refused.group(1)) > 0, "the refusals are counted");
+	}
+
+	@Test
+	@Tag("integration")
+	void groupTransfersCanBeSwitchedOff() throws Exception {
+		testbed("partitions.group_transfer", "false");
+		Path output = Path.of(TEST_OUTPUT, "convoy-static");
+		String console = runConvoy(GroupStrategies.OPEN, output);
+		assertFalse(console.contains("unexpected error"), console);
+
+		for (Map<String, String> group : rows(output.resolve(convoyLabel(GroupStrategies.OPEN) + "_partitions.csv")))
+			for (String column : List.of("servers_joined", "servers_left", "devices_joined", "devices_left"))
+				assertEquals(0, number(group, column), column + " of " + group);
+		assertEquals(0, GroupStrategies.asked, "the strategy is never asked");
+		assertEquals(0, GroupStrategies.crossings, "and no path crosses two groups");
+	}
+
+	@Test
+	@Tag("integration")
+	void aStrategyThatRetriesRecoversTasksWhoseDeviceWasOutOfRange() throws Exception {
+		Path once = Path.of(TEST_OUTPUT, "convoy-once");
+		String access = runConvoy(ACCESS, once);
+		Path retried = Path.of(TEST_OUTPUT, "convoy-retry");
+		String retry = runConvoy(RETRY, retried);
+
+		double[] detachedOnce = exposure(access, "device_detached");
+		double[] detachedRetried = exposure(retry, "device_detached");
+		assertTrue(detachedOnce[0] > 0 && detachedRetried[0] > 0, "devices go out of range in the convoy");
+		assertTrue(detachedRetried[1] > detachedOnce[1], "a device that sends again when it is back saves tasks: "
+				+ detachedOnce[1] + "% -> " + detachedRetried[1] + "%");
+		assertTrue(percent(retry, "lossless services") > percent(access, "lossless services"),
+				"which a lossless service counts, late or not: " + percent(access, "lossless services") + "% -> "
+						+ percent(retry, "lossless services") + "%");
+	}
+
+	/**
+	 * Runs three minutes of the convoy scenario with one strategy, and one
+	 * partition from 60 s to 120 s.
+	 *
+	 * @return what the run printed
+	 */
+	private String runConvoy(String algorithm, Path output) throws Exception {
 		Files.createDirectories(output);
 		String parameters = Files.readString(Testbed.simulationParameters(CONVOY_SETTINGS))
-				.replaceAll("(?m)^orchestration_algorithms=.*$", "orchestration_algorithms=" + ACCESS)
+				.replaceAll("(?m)^orchestration_algorithms=.*$", "orchestration_algorithms=" + algorithm)
 				.replaceAll("(?m)^simulation_time=.*$", "simulation_time=3")
 				.replaceAll("(?m)^(m..)_number_of_edge_devices=.*$", "$1_number_of_edge_devices=" + CONVOY_DEVICES)
 				.replaceAll("(?m)^edge_device_counter_size=.*$", "edge_device_counter_size=" + CONVOY_DEVICES);
@@ -322,33 +397,18 @@ class TestbedScenariosTest extends TestbedTestSupport {
 		} finally {
 			System.setOut(originalOut);
 		}
-		String console = captured.toString(StandardCharsets.UTF_8);
-		assertFalse(console.contains("unexpected error"), console);
+		return captured.toString(StandardCharsets.UTF_8);
+	}
 
-		String label = "testbed_" + ACCESS + "_" + CONVOY_DEVICES + "_devices_mixed";
-		List<Map<String, String>> types = rows(output.resolve(label + "_device_types.csv"));
-		assertEquals(List.of("Scout UAV", "Mapping UAV", "Ground sensor"),
-				types.stream().map(row -> row.get("device_type")).collect(Collectors.toList()));
-		for (Map<String, String> type : types)
-			assertTrue(number(type, "tasks_ok") > 0, type.get("device_type") + " is served");
-		// Only the last of the three stages of the scouts' pipeline returns anything:
-		// the mapping pipeline and the telemetry are fire and forget.
-		double scoutTasks = number(types.get(0), "tasks_ok") + number(types.get(0), "tasks_failed");
-		int returned = reported(console, "results reached their device");
-		assertTrue(returned > 0 && returned <= scoutTasks / 3 + 1, returned + " results for " + scoutTasks
-				+ " scout tasks");
-		for (Map<String, String> group : rows(output.resolve(label + "_partitions.csv")))
-			assertEquals(0, number(group, "access_nodes_with_cloud"), "no group keeps the cloud");
-		List<Map<String, String>> timeline = rows(output.resolve(label + "_timeline.csv"));
-		assertTrue(number(timeline.get(timeline.size() - 1), "handovers") > 0,
-				"devices follow the servers that move");
+	private static String convoyLabel(String algorithm) {
+		return "testbed_" + algorithm + "_" + CONVOY_DEVICES + "_devices_mixed";
 	}
 
 	// -------------------------------------------------------------- helpers
 
 	private static List<String> tasksByType(List<Map<String, String>> types) {
 		return types.stream()
-				.map(row -> row.get("device_type") + ":" + (number(row, "tasks_ok") + number(row, "tasks_failed")))
+				.map(row -> row.get("device_type") + ":" + (number(row, "tasks") + number(row, "tasks_censored")))
 				.collect(Collectors.toList());
 	}
 

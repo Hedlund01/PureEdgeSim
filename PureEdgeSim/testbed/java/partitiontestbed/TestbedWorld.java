@@ -3,6 +3,7 @@ package partitiontestbed;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -17,6 +18,8 @@ import com.mechalikh.pureedgesim.datacentersmanager.ComputingNode.LinkOrientatio
 import com.mechalikh.pureedgesim.locationmanager.MobilityModelFactory;
 import com.mechalikh.pureedgesim.network.NetworkLink;
 import com.mechalikh.pureedgesim.simulationengine.PureEdgeSim;
+
+import partitiontestbed.NetworkPolicy.Layer;
 
 /**
  * Everything the testbed shares between the framework classes of one run, and
@@ -40,41 +43,22 @@ import com.mechalikh.pureedgesim.simulationengine.PureEdgeSim;
  * fails or the device or the server moves out of {@code devices.radio_range_m}.
  * The device then attaches to the nearest access server in range that answers,
  * and its service is deployed again from there; with none in range it is cut
- * off until one comes back.
+ * off until one comes back. While a partition lasts, an access server of another
+ * group takes the device only if the strategy admits it into that group
+ * ({@link OrchestrationStrategy#admitJoin}), and never when
+ * {@code partitions.group_transfer} is off.
+ * <p>
+ * <b>Radio.</b> Which radio links are in use follows the strategy's
+ * {@link NetworkPolicy}: with multi-homing a device also keeps a link to every
+ * other access server in range, and with links between devices it has one to
+ * every device within {@code d2d.range_m}. A device's group is that of its access
+ * server. A radio link between two groups of a partition stays out of the routes
+ * unless {@code partitions.cross_group_radio} is on and the policy bridges
+ * groups.
  *
  * @see TestbedSimulationManager
  */
 public class TestbedWorld {
-
-	/** Where a device's service runs. */
-	public static final class Placement {
-		/** The device that calls it. */
-		public final ComputingNode device;
-		/** The access server of the device. */
-		public final EdgeServer home;
-		/** The server that runs it, or {@code null} for the cloud. */
-		public final EdgeServer host;
-		/** The service. */
-		public final Service service;
-		/** What the strategy keeps about it, from {@link Deployment#detail}. */
-		public final Object detail;
-
-		Placement(ComputingNode device, EdgeServer home, EdgeServer host, Service service, Object detail) {
-			this.device = device;
-			this.home = home;
-			this.host = host;
-			this.service = service;
-			this.detail = detail;
-		}
-
-		/**
-		 * @param world the testbed
-		 * @return the computing node that runs the service
-		 */
-		public ComputingNode node(TestbedWorld world) {
-			return host == null ? world.cloud : host.node;
-		}
-	}
 
 	/** A kind of end device of {@code edge_devices.xml}, and the application it runs. */
 	public static final class DeviceType {
@@ -94,11 +78,15 @@ public class TestbedWorld {
 		}
 	}
 
-	/** One partition in progress: the group of every server. */
+	/**
+	 * One partition in progress: the group of every server. A moving server can
+	 * change group while it lasts ({@code partitions.group_transfer}), so the map
+	 * is the group of each server now, not when the partition started.
+	 */
 	public static final class ActivePartition {
 		/** The partition of the file. */
 		public final TestbedConfig.PartitionSpec spec;
-		/** The group of each server. */
+		/** The group each server is in now. */
 		public final Map<EdgeServer, Integer> groupOf;
 		/** What each group holds, and what happened in it. */
 		public final List<TestbedMetrics.GroupRecord> groups;
@@ -119,7 +107,9 @@ public class TestbedWorld {
 	/** What is measured. */
 	public final TestbedMetrics metrics;
 	/** The strategy under test. */
-	final PlacementStrategy strategy;
+	final OrchestrationStrategy strategy;
+	/** Carries out what the strategy decides, and keeps the ledger of every task. */
+	TaskEngine engine;
 
 	/** Which run of the sweep this is, from 0. */
 	public final int replication;
@@ -141,10 +131,11 @@ public class TestbedWorld {
 	private final Map<ComputingNode, EdgeServer> homeOf = new LinkedHashMap<>();
 	private final Map<ComputingNode, DeviceType> deviceTypeOf = new HashMap<>();
 	private final List<DeviceType> deviceTypes = new ArrayList<>();
-	private final Map<ComputingNode, Placement> placements = new LinkedHashMap<>();
+	/** Whether each device could reach its access server at the last update. */
+	private final Map<ComputingNode, Boolean> wasAttached = new HashMap<>();
 	private final List<ActivePartition> active = new ArrayList<>();
 
-	TestbedWorld(TestbedSimulationManager manager, TestbedConfig config, PlacementStrategy strategy) {
+	TestbedWorld(TestbedSimulationManager manager, TestbedConfig config, OrchestrationStrategy strategy) {
 		this.manager = manager;
 		this.config = config;
 		this.strategy = strategy;
@@ -172,7 +163,7 @@ public class TestbedWorld {
 	}
 
 	/** @return the strategy under test */
-	public PlacementStrategy strategy() {
+	public OrchestrationStrategy strategy() {
 		return strategy;
 	}
 
@@ -275,6 +266,72 @@ public class TestbedWorld {
 		return topology;
 	}
 
+	/**
+	 * @param node a node of the continuum
+	 * @return its layer
+	 */
+	public Layer layerOf(ComputingNode node) {
+		if (node == cloud)
+			return Layer.CLOUD;
+		return serverOf.containsKey(node) ? Layer.EDGE : Layer.DEVICE;
+	}
+
+	/**
+	 * @return whether a link is a radio link: one of its ends is a device or a
+	 *         moving edge server
+	 */
+	boolean isRadio(ComputingNode a, ComputingNode b) {
+		return isRadio(a) || isRadio(b);
+	}
+
+	private boolean isRadio(ComputingNode node) {
+		if (node == cloud)
+			return false;
+		EdgeServer server = serverOf.get(node);
+		return server == null || server.mobile;
+	}
+
+	/**
+	 * @param node a device or an edge server
+	 * @return the server whose partition group it is in: itself, or a device's
+	 *         access server; {@code null} for the cloud
+	 */
+	private EdgeServer groupServer(ComputingNode node) {
+		EdgeServer server = serverOf.get(node);
+		return server != null ? server : homeOf.get(node);
+	}
+
+	/**
+	 * The barrier of the live topology: a link between two groups of a partition
+	 * in progress is out of the routes, unless it is a radio link that the scenario
+	 * lets exist between groups and the strategy bridges groups. The wired links
+	 * between groups are also cut by the partition itself.
+	 */
+	boolean blocks(NetworkLink link) {
+		if (active.isEmpty())
+			return false;
+		ComputingNode a = link.getSrc();
+		ComputingNode b = link.getDst();
+		EdgeServer groupA = groupServer(a);
+		EdgeServer groupB = groupServer(b);
+		if (groupA == null || groupB == null || !separated(groupA, groupB))
+			return false;
+		return !(config.crossGroupRadio && topology.policy().bridgesGroups() && isRadio(a, b));
+	}
+
+	/**
+	 * @param node a device or an edge server
+	 * @return the nodes its radio has a link in use to, see
+	 *         {@link StrategyContext#radioContacts}
+	 */
+	List<ComputingNode> radioContacts(ComputingNode node) {
+		List<ComputingNode> contacts = new ArrayList<>();
+		for (ComputingNode other : topology.neighbours(node))
+			if (isRadio(node, other) && other != cloud)
+				contacts.add(other);
+		return contacts;
+	}
+
 	// -------------------------------------------------------------- devices
 
 	/** Attaches a device to the access server it was placed next to. */
@@ -321,8 +378,9 @@ public class TestbedWorld {
 	 * <p>
 	 * A device stays with its access server for as long as that server is in range
 	 * and answers. Otherwise it attaches to the nearest access server in range that
-	 * does, and waits, cut off, when there is none. A device in range of a server
-	 * that failed only looks elsewhere when {@code devices.failover} is on.
+	 * does and that it may join (see {@link #mayJoin}), and waits, cut off, when
+	 * there is none. A device in range of a server that failed only looks elsewhere
+	 * when {@code devices.failover} is on.
 	 */
 	void updateAttachments() {
 		for (Map.Entry<ComputingNode, EdgeServer> attachment : new ArrayList<>(homeOf.entrySet())) {
@@ -333,23 +391,93 @@ public class TestbedWorld {
 				topology.enable(link, inRange, now());
 			if (inRange && (!topology.isFailed(home.node) || !config.failover))
 				continue;
-			EdgeServer nearest = null;
-			double best = config.radioRange;
-			for (EdgeServer server : servers) {
-				if (!server.access || server == home || topology.isFailed(server.node))
-					continue;
-				double distance = device.getMobilityModel().distanceTo(server.node);
-				if (distance <= best) {
-					best = distance;
-					nearest = server;
+			List<EdgeServer> candidates = new ArrayList<>();
+			for (EdgeServer server : servers)
+				if (server.access && server != home && !topology.isFailed(server.node)
+						&& device.getMobilityModel().distanceTo(server.node) <= config.radioRange)
+					candidates.add(server);
+			// Nearest first; the sort is stable, so equal distances keep the order of the servers.
+			candidates.sort(Comparator.comparingDouble(server -> device.getMobilityModel().distanceTo(server.node)));
+			for (EdgeServer server : candidates)
+				if (mayJoin(device, home, server)) {
+					handover(device, home, server);
+					break;
 				}
+		}
+		if (topology.policy().multiHoming())
+			updateOtherAccessLinks();
+		creator.updateDeviceLinks();
+		// What each device's radio tells it: it lost every server, or found its own again.
+		for (ComputingNode device : homeOf.keySet()) {
+			boolean now = attached(device);
+			Boolean before = wasAttached.put(device, now);
+			if (before == null || before == now)
+				continue;
+			if (!now) {
+				engine.expose(device, Job.Exposure.DEVICE_DETACHED);
+				strategy.onAttachmentChanged(device, homeOf.get(device), null);
+			} else
+				strategy.onAttachmentChanged(device, null, homeOf.get(device));
+		}
+	}
+
+	/**
+	 * Decides whether a node may reach {@code contact} as a member of its group:
+	 * always when no partition in progress puts {@code current} and {@code contact}
+	 * in two groups, otherwise only when {@code partitions.group_transfer} is on and
+	 * the strategy admits it into the group of {@code contact} of every such
+	 * partition.
+	 *
+	 * @param node    the device, or the moving server, asking to join
+	 * @param current the server whose group the node is in now: a device's access
+	 *                server, or the moving server itself
+	 * @param contact the server it can reach
+	 * @return whether it may
+	 */
+	boolean mayJoin(ComputingNode node, EdgeServer current, EdgeServer contact) {
+		if (!separated(current, contact))
+			return true;
+		if (!config.groupTransfer)
+			return false;
+		if (strategy.admitJoin(node, contact))
+			return true;
+		for (ActivePartition partition : active)
+			if (!partition.groupOf.get(current).equals(partition.groupOf.get(contact)))
+				metrics.joinRefused(partition, node, partition.groupOf.get(contact));
+		return false;
+	}
+
+	/**
+	 * Keeps a device of a multi-homing strategy linked to every access server in
+	 * range besides its own, which the loop above already took care of.
+	 */
+	private void updateOtherAccessLinks() {
+		for (Map.Entry<ComputingNode, EdgeServer> attachment : homeOf.entrySet()) {
+			ComputingNode device = attachment.getKey();
+			Map<EdgeServer, NetworkLink[]> known = radio.get(device);
+			for (EdgeServer server : servers) {
+				if (!server.access || server == attachment.getValue())
+					continue;
+				boolean inRange = device.getMobilityModel().distanceTo(server.node) <= config.radioRange;
+				if (!inRange && (known == null || !known.containsKey(server)))
+					continue;
+				for (NetworkLink link : radioLinks(device, server))
+					topology.enable(link, inRange, now());
 			}
-			if (nearest != null)
-				handover(device, home, nearest);
 		}
 	}
 
 	private void handover(ComputingNode device, EdgeServer from, EdgeServer to) {
+		boolean groupChanged = false;
+		for (ActivePartition partition : active) {
+			int left = partition.groupOf.get(from);
+			int joined = partition.groupOf.get(to);
+			if (left != joined) {
+				metrics.deviceChangedGroup(partition, left, joined);
+				groupChanged = true;
+			}
+		}
+		boolean wasReachable = wasAttached.getOrDefault(device, true);
 		for (NetworkLink link : radioLinks(device, from))
 			topology.enable(link, false, now());
 		NetworkLink[] links = radioLinks(device, to);
@@ -359,11 +487,14 @@ public class TestbedWorld {
 		device.setOrchestrator(to.node);
 		device.setCurrentLink(links[0], LinkOrientation.UP_LINK);
 		device.setCurrentLink(links[1], LinkOrientation.DOWN_LINK);
-		// The service was deployed from the server the device left: its next task
-		// deploys it again from the new one.
-		unplace(device);
 		metrics.handover(device, from, to);
-		strategy.deviceMoved(device, from, to);
+		engine.expose(device, Job.Exposure.HANDOVER);
+		if (groupChanged) {
+			engine.expose(device, Job.Exposure.GROUP_CHANGE);
+			topology.groupsChanged();
+		}
+		wasAttached.put(device, true);
+		strategy.onAttachmentChanged(device, wasReachable ? from : null, to);
 	}
 
 	/**
@@ -405,63 +536,16 @@ public class TestbedWorld {
 		return Collections.unmodifiableList(deviceTypes);
 	}
 
-	// ----------------------------------------------------------- placements
-
-	/** Records where a device's service now runs. */
-	void place(Placement placement) {
-		placements.put(placement.device, placement);
-	}
-
-	/** Records the placement a successful deployment made. */
-	void place(Deployment deployment) {
-		place(new Placement(deployment.device, deployment.home, deployment.host, deployment.service,
-				deployment.detail));
-	}
-
-	/**
-	 * @param device an end device
-	 * @return where its service runs, or {@code null} when it is not deployed
-	 */
-	public Placement placementOf(ComputingNode device) {
-		return placements.get(device);
-	}
-
-	/** @return every placement in force */
-	public Collection<Placement> placements() {
-		return Collections.unmodifiableCollection(new ArrayList<>(placements.values()));
-	}
-
-	/**
-	 * Ends the placement of a device, if it has one, and lets the strategy free
-	 * what it held.
-	 *
-	 * @param device the device whose service is moved away
-	 */
-	void release(ComputingNode device) {
-		Placement placement = placements.remove(device);
-		if (placement != null)
-			strategy.release(placement);
-	}
-
-	/**
-	 * Moves the service of a device away, so that its next task deploys it again:
-	 * what a strategy calls when it decides a placement is no longer good.
-	 *
-	 * @param device the device
-	 */
-	public void unplace(ComputingNode device) {
-		device.setApplicationPlaced(false);
-		release(device);
-	}
-
 	// ----------------------------------------------------------- partitions
 
 	void partitionStarted(ActivePartition partition) {
 		active.add(partition);
+		topology.groupsChanged();
 	}
 
 	void partitionEnded(ActivePartition partition) {
 		active.remove(partition);
+		topology.groupsChanged();
 	}
 
 	/**

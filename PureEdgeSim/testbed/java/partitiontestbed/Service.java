@@ -39,13 +39,38 @@ public final class Service {
 	 * the edge, from host to host, rather than back through the device.
 	 */
 	public final boolean edgePipeline;
+	/**
+	 * What its tasks must achieve to count: {@code true} to reach the device at
+	 * all, within {@link #deliveryWindow}, late or not; {@code false} to reach it
+	 * before their deadline.
+	 */
+	public final boolean lossless;
+	/** Time after its creation within which a task still counts as delivered, in seconds. */
+	public final double deliveryWindow;
+	/** Share of its tasks that must meet the requirement, in percent, or NaN for none. */
+	public final double targetPct;
+	/** Memory an instance of it holds on its host, in megabytes: the same for every strategy. */
+	public final double memory;
+	/** Time an instance of it takes to start, in seconds: the same for every strategy. */
+	public final double startup;
 
-	Service(int id, String name, Set<Trait> required, boolean returnsResults, boolean edgePipeline) {
+	Service(int id, String name, Set<Trait> required, boolean returnsResults, boolean edgePipeline,
+			boolean lossless, double deliveryWindow, double targetPct, double memory, double startup) {
 		this.id = id;
 		this.name = name;
 		this.required = Collections.unmodifiableSet(required);
 		this.returnsResults = returnsResults;
 		this.edgePipeline = edgePipeline;
+		this.lossless = lossless;
+		this.deliveryWindow = deliveryWindow;
+		this.targetPct = targetPct;
+		this.memory = memory;
+		this.startup = startup;
+	}
+
+	/** @return {@code lossless} or {@code deadline}, the requirement of its tasks */
+	public String requirement() {
+		return lossless ? "lossless" : "deadline";
 	}
 
 	/**
@@ -81,7 +106,8 @@ public final class Service {
 						required.add(trait);
 			}
 			services.add(new Service(s, s < names.size() ? names.get(s) : "S" + s, required, config.returnsResults(s),
-					config.edgePipeline(s)));
+					config.edgePipeline(s), config.lossless(s), config.deliveryWindow(s), config.target(s),
+					config.instanceMemory(s), config.instanceStartup(s)));
 		}
 		return services;
 	}

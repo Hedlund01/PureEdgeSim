@@ -54,9 +54,9 @@ class FlockyTest extends TestbedTestSupport {
 
 		List<Map<String, String>> timeline = rows(FLOCKY, "timeline");
 		Map<String, String> last = timeline.get(timeline.size() - 1);
-		assertEquals(1.0, number(last, "discovery_accuracy"), 1e-9, "every pair within the discovery distance is found");
-		assertEquals(0.0, number(last, "stale_share"), 1e-9, "and no known server is out of reach");
-		assertFalse(console.contains("FAILED_DUE_TO_NETWORK_OUTAGE"), "nothing is lost on a whole network");
+		assertTrue(number(last, "known_per_node") >= 2, "every server finds others by pinging them");
+		assertTrue(number(last, "control_kbps_per_server") > 0, "which costs traffic on the network");
+		assertEquals(0, percent(console, "lost"), 0.05, "nothing is lost on a whole network");
 		// Not every task: the half second of the AR assistant is missed now and then
 		// when tasks queue on a busy edge server, which has nothing to do with the
 		// network.
@@ -70,12 +70,18 @@ class FlockyTest extends TestbedTestSupport {
 		run(FLOCKY);
 
 		List<Map<String, String>> timeline = rows(FLOCKY, "timeline");
-		double before = number(at(timeline, 80), "known_per_node");
-		double during = number(at(timeline, 170), "known_per_node");
-		double after = number(at(timeline, 230), "known_per_node");
+		// A row is taken in the middle of discovery rounds, so the view is averaged
+		// over a minute before, during and after the cut.
+		double before = known(timeline, 20, 80);
+		double during = known(timeline, 110, 170);
+		double after = known(timeline, 190, 240);
 		assertTrue(during < before, "a server no longer knows the servers across the cut: " + before + " -> " + during);
-		assertEquals(before, after, 1e-9, "and finds them all again once the cut heals");
-		assertEquals(1.0, number(at(timeline, 230), "discovery_accuracy"), 1e-9);
+		assertTrue(after > during, "and finds them again once the cut heals: " + during + " -> " + after);
+	}
+
+	private static double known(List<Map<String, String>> timeline, double from, double to) {
+		return timeline.stream().filter(row -> number(row, "time_s") >= from && number(row, "time_s") <= to)
+				.mapToDouble(row -> number(row, "known_per_node")).average().orElseThrow();
 	}
 
 	@Test
@@ -95,7 +101,7 @@ class FlockyTest extends TestbedTestSupport {
 				assertEquals("0", group.get("access_nodes_with_cloud"), "only group 1 keeps the cloud");
 
 		int during = 0;
-		for (Map<String, String> deployment : rows(FLOCKY, "deployments")) {
+		for (Map<String, String> deployment : rows(FLOCKY, "flocky_deployments")) {
 			double time = number(deployment, "time_s");
 			if (time < 90 || time >= 180)
 				continue;
@@ -115,7 +121,7 @@ class FlockyTest extends TestbedTestSupport {
 
 	@Test
 	@Tag("integration")
-	void aTaskThatMustReturnItsResultIsLostWhenTheWayBackBreaks() throws Exception {
+	void aResultIsLostWhenTheWayBackBreaksAndFlockyDoesNotSendItAgain() throws Exception {
 		// The services run away from the access server, so that their results cross
 		// mesh links on the way back, and the links fail often.
 		flocky("swirly.allow_local", "false");
@@ -124,14 +130,13 @@ class FlockyTest extends TestbedTestSupport {
 		String console = run(FLOCKY);
 
 		assertTrue(console.contains("results returned to the device"));
-		assertTrue(reported(console, "results reached their device") > 0, "the results come back");
-		int lostWithResult = reported(console, "lost with their result");
-		assertTrue(lostWithResult > 0, "and some of the tasks that ran are lost on the way back");
-		assertEquals(lostWithResult,
-				rows(FLOCKY, "failures").stream().filter(row -> "result".equals(row.get("lost_on"))).count(),
-				"every one of them is in the failures file");
-		assertEquals(reported(console, "failed \\("), rows(FLOCKY, "failures").size(),
-				"and so is every failed task");
+		List<Map<String, String>> tasks = rows(FLOCKY, "tasks");
+		assertTrue(outcomes(tasks, "on_time") > 0, "the results come back");
+		assertTrue(outcomes(tasks, "lost") > 0, "and some are lost with a link");
+		assertEquals(0, tasks.stream().mapToDouble(row -> number(row, "duplicates")).sum(), 1e-9,
+				"Flocky defines no retry: nothing arrives twice");
+		assertTrue(tasks.stream().allMatch(row -> number(row, "attempts") <= 1),
+				"and nothing is run twice");
 	}
 
 	// -------------------------------------------------------------- helpers

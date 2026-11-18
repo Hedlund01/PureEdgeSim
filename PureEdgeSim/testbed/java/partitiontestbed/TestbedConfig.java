@@ -92,6 +92,34 @@ public class TestbedConfig extends PropertiesFile {
 	public final double radioRange;
 	/** Whether a device whose access server stops answering attaches to another one in range. */
 	public final boolean failover;
+	/**
+	 * Whether a node can change partition group while a partition lasts: a moving
+	 * server out of contact with its own group joins a group it is in range of, and
+	 * a device attaches to an access server of another group, each time the strategy
+	 * admits it ({@link OrchestrationStrategy#admitJoin}). {@code false} keeps every node
+	 * in the group the partition gave it.
+	 */
+	public final boolean groupTransfer;
+	/**
+	 * Range of the radio between two devices, in metres; 0 when devices have none.
+	 * The link exists while they are in range; whether a strategy uses it is its
+	 * {@link NetworkPolicy}.
+	 */
+	public final double d2dRange;
+	/** Latency of a radio link between two devices: a fixed part, in seconds. */
+	public final double d2dBaseLatency;
+	/** And a part per kilometre of distance, in seconds. */
+	public final double d2dLatencyPerKm;
+	/**
+	 * Whether a radio link (between two devices, between a device and an access
+	 * server, or to a moving server) still carries between two nodes that a
+	 * partition puts in two groups. {@code false}: a partition isolates its groups
+	 * completely, and a node crosses only by joining another group. {@code true}:
+	 * the partition cuts the wired links between its groups, and a radio contact
+	 * between them is a link like any other, which a strategy whose policy
+	 * {@linkplain NetworkPolicy#bridgeGroups bridges groups} routes over.
+	 */
+	public final boolean crossGroupRadio;
 	public final long seed;
 	/** Number of times the sweep is run, each on its own continuum, failures and tasks. */
 	public final int replications;
@@ -113,6 +141,31 @@ public class TestbedConfig extends PropertiesFile {
 	private final Map<Integer, Set<Trait>> serviceTraits = new HashMap<>();
 	private final Map<Integer, Boolean> serviceReturnsResults = new HashMap<>();
 	private final Map<Integer, Boolean> serviceEdgePipeline = new HashMap<>();
+	private final Map<Integer, Boolean> serviceLossless = new HashMap<>();
+	private final Map<Integer, Double> serviceDeliveryWindow = new HashMap<>();
+	private final Map<Integer, Double> serviceTarget = new HashMap<>();
+	private final Map<Integer, Double> serviceMemory = new HashMap<>();
+	private final Map<Integer, Double> serviceStartup = new HashMap<>();
+
+	// Requirements and instances
+	/**
+	 * Whether a task must above all reach its device, late or not
+	 * ({@code tasks.requirement=lossless}), rather than reach it before its
+	 * deadline ({@code deadline}).
+	 */
+	public final boolean lossless;
+	/** Time after its creation within which a task still counts as delivered, in seconds. */
+	public final double deliveryWindow;
+	/** Memory an instance of a service holds on its host, in megabytes. */
+	public final double instanceMemory;
+	/** Time an instance takes to start, in seconds. */
+	public final double instanceStartup;
+	/**
+	 * Whether a failed server loses its running tasks and its instances
+	 * ({@code failures.node_failure_mode=crash}), rather than only being cut off
+	 * with its state kept ({@code isolate}).
+	 */
+	public final boolean nodeCrash;
 
 	// Tasks
 	/**
@@ -157,6 +210,11 @@ public class TestbedConfig extends PropertiesFile {
 		devicesRadius = number("devices.radius_m", 0, Double.MAX_VALUE);
 		radioRange = number("devices.radio_range_m", 0, Double.MAX_VALUE, 300);
 		failover = bool("devices.failover", true);
+		groupTransfer = bool("partitions.group_transfer", true);
+		crossGroupRadio = bool("partitions.cross_group_radio", false);
+		d2dRange = number("d2d.range_m", 0, Double.MAX_VALUE, 0);
+		d2dBaseLatency = number("d2d.base_latency_ms", 0, Double.MAX_VALUE, 2) / 1000;
+		d2dLatencyPerKm = number("d2d.latency_per_km_ms", 0, Double.MAX_VALUE, 4) / 1000;
 		seed = (long) number("seed", Long.MIN_VALUE, Long.MAX_VALUE);
 		replications = integer("replications", 1, 10_000, 1);
 
@@ -194,14 +252,32 @@ public class TestbedConfig extends PropertiesFile {
 				String pipeline = choice(key, null, "device", "edge");
 				if (pipeline != null)
 					serviceEdgePipeline.put(index, "edge".equals(pipeline));
-			} else
-				throw invalid(key, "expected services.<n>.<traits|delivery|pipeline>");
+			} else if ("requirement".equals(setting)) {
+				String requirement = choice(key, null, "deadline", "lossless");
+				if (requirement != null)
+					serviceLossless.put(index, "lossless".equals(requirement));
+			} else if ("delivery_window_s".equals(setting))
+				serviceDeliveryWindow.put(index, number(key, 0, Double.MAX_VALUE));
+			else if ("target_pct".equals(setting))
+				serviceTarget.put(index, number(key, 0, 100));
+			else if ("memory_mb".equals(setting))
+				serviceMemory.put(index, number(key, 0, Double.MAX_VALUE));
+			else if ("startup_ms".equals(setting))
+				serviceStartup.put(index, number(key, 0, Double.MAX_VALUE) / 1000);
+			else
+				throw invalid(key, "expected services.<n>.<traits|delivery|pipeline|requirement|delivery_window_s|"
+						+ "target_pct|memory_mb|startup_ms>");
 		}
 
 		String delivery = required("tasks.delivery").trim().toLowerCase();
 		if (!"result".equals(delivery) && !"fire_and_forget".equals(delivery))
 			throw invalid("tasks.delivery", "expected result or fire_and_forget");
 		returnResults = "result".equals(delivery);
+		lossless = "lossless".equals(choice("tasks.requirement", "deadline", "deadline", "lossless"));
+		deliveryWindow = number("tasks.delivery_window_s", 0, Double.MAX_VALUE, 60);
+		instanceMemory = number("instances.memory_mb", 0, Double.MAX_VALUE, 512);
+		instanceStartup = number("instances.startup_ms", 0, Double.MAX_VALUE, 500) / 1000;
+		nodeCrash = "crash".equals(choice("failures.node_failure_mode", "isolate", "isolate", "crash"));
 
 		linkFailureRate = number("failures.link_failure_rate_per_hour", 0, Double.MAX_VALUE) / 3600;
 		linkRepairTime = number("failures.link_mean_repair_s", 0.001, Double.MAX_VALUE);
@@ -245,6 +321,49 @@ public class TestbedConfig extends PropertiesFile {
 	 */
 	public boolean edgePipeline(int service) {
 		return serviceEdgePipeline.getOrDefault(service, false);
+	}
+
+	/**
+	 * @param service the index of a service
+	 * @return whether its requirement is to reach the device at all
+	 *         ({@code lossless}) rather than before the deadline
+	 */
+	public boolean lossless(int service) {
+		return serviceLossless.getOrDefault(service, lossless);
+	}
+
+	/**
+	 * @param service the index of a service
+	 * @return the time after its creation within which a task of it still counts
+	 *         as delivered, in seconds
+	 */
+	public double deliveryWindow(int service) {
+		return serviceDeliveryWindow.getOrDefault(service, deliveryWindow);
+	}
+
+	/**
+	 * @param service the index of a service
+	 * @return the share of its tasks that must meet the requirement, in percent,
+	 *         or NaN when it sets no target
+	 */
+	public double target(int service) {
+		return serviceTarget.getOrDefault(service, Double.NaN);
+	}
+
+	/**
+	 * @param service the index of a service
+	 * @return the memory an instance of it holds, in megabytes
+	 */
+	public double instanceMemory(int service) {
+		return serviceMemory.getOrDefault(service, instanceMemory);
+	}
+
+	/**
+	 * @param service the index of a service
+	 * @return the time an instance of it takes to start, in seconds
+	 */
+	public double instanceStartup(int service) {
+		return serviceStartup.getOrDefault(service, instanceStartup);
 	}
 
 	/** @return whether the services do not all share one delivery mode */

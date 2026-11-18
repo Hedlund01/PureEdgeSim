@@ -3,9 +3,8 @@ package partitiontestbed;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.knowm.xchart.BitmapEncoder;
@@ -13,7 +12,6 @@ import org.knowm.xchart.BitmapEncoder.BitmapFormat;
 
 import com.mechalikh.pureedgesim.datacentersmanager.ComputingNode;
 import com.mechalikh.pureedgesim.distribution.Randomness;
-import com.mechalikh.pureedgesim.network.NetworkModel;
 import com.mechalikh.pureedgesim.scenariomanager.ApplicationFileParser;
 import com.mechalikh.pureedgesim.scenariomanager.Scenario;
 import com.mechalikh.pureedgesim.scenariomanager.SimulationParameters;
@@ -25,34 +23,25 @@ import com.mechalikh.pureedgesim.simulationmanager.SimLog;
 import com.mechalikh.pureedgesim.taskgenerator.Task;
 
 /**
- * Runs the tasks of the devices through the strategy under test, while the
- * network breaks under them.
+ * Hands the tasks of the devices to the strategy under test, while the network
+ * breaks under them, and judges them at the end.
  * <p>
- * The first task of a device finds its service undeployed. The testbed then asks
- * the strategy to deploy it, from the device's access server, and the task waits
- * the time the strategy says the deployment took: that wait is part of the delay
- * the task is judged on. The tasks the device sends in the meantime queue behind
- * the same deployment. Once deployed, the tasks go straight to the host, until
- * one of them fails or the strategy moves the service; the next one deploys it
- * again.
+ * The framework generates the tasks of every device and runs them on its nodes.
+ * Everything in between is the strategy's: when a device creates a task, the
+ * {@link TaskEngine} asks the strategy what to do with it, and the strategy sends
+ * it, dispatches it to one host or several, deploys instances, exchanges its own
+ * messages and decides what to do with results, all over the live network. The
+ * framework's own path for a task (orchestrator, offloading destination, results
+ * through the orchestrator) is not used.
  * <p>
- * A task either must bring its result back to the device before its deadline
- * ({@code result}), or is done once it has run on its host
- * ({@code fire_and_forget}): {@code tasks.delivery} says which, and
- * {@code services.<n>.delivery} says otherwise for one service, so one run can
- * mix both. Every task that ends is counted, so that the report can tell those
- * that ended while the edge layer was whole from those that ended in each group
- * of a partition.
+ * A task is done when its first result reaches its device, or, when it returns
+ * nothing, when it first finishes on a host. When the run ends every task is
+ * judged against the requirement of its service, so the run ends at
+ * {@code simulation_time} whatever is still on its way.
  * <p>
- * A service whose application is a graph of subtasks can run it as a pipeline on
- * the edge ({@code services.<n>.pipeline=edge}): a stage that has run hands its
- * output to the next stage from its own host, and nothing goes back to the
- * device before the last stage, which follows the delivery mode of the service.
- * <p>
- * The strategy is asked where each task goes
- * ({@link PlacementStrategy#route(Task, TestbedWorld.Placement)}) and told of
- * each task that fails, which is when it decides whether the placement stays
- * ({@link PlacementStrategy#taskFailed(Task, TestbedWorld.Placement)}).
+ * A service whose application is a graph of subtasks runs it stage by stage:
+ * through the device, or on the edge ({@code services.<n>.pipeline=edge}), where a
+ * stage that has run hands its output to the next one at its own host.
  * <p>
  * Every iteration of a sweep draws the same devices and the same tasks: the
  * framework's random stream is restarted from {@code random_seed} and the
@@ -60,12 +49,10 @@ import com.mechalikh.pureedgesim.taskgenerator.Task;
  * scenarios one after the other ({@code parallel_simulation=false}).
  *
  * @see Testbed
- * @see PlacementStrategy
+ * @see OrchestrationStrategy
  */
 public class TestbedSimulationManager extends DefaultSimulationManager implements OnSimulationEndListener {
 
-	/** Event that ends a deployment. */
-	private static final int DEPLOYMENT_DONE = 300;
 	/** Event that takes a row of the timeline. */
 	private static final int SAMPLE = 301;
 	/** Event that makes the network follow what moved. */
@@ -73,10 +60,6 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 
 	private final TestbedWorld world;
 	private final FailureInjector injector;
-	/** Tasks waiting for the deployment of their device's service. */
-	private final Map<ComputingNode, List<Task>> waiting = new HashMap<>();
-	/** Time each waiting task started to wait. */
-	private final Map<Task, Double> waitingSince = new HashMap<>();
 	/** The deployment map, when the charts are shown or saved. */
 	private DeploymentChart deploymentChart;
 
@@ -104,6 +87,7 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 				Testbed.strategy(scenario.getStringOrchAlgorithm()));
 		injector = new FailureInjector(world);
 		world.injector = injector;
+		world.engine = new TaskEngine(world, this, world.strategy);
 	}
 
 	/** @return the testbed of this run */
@@ -123,7 +107,7 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 			throw new IllegalArgumentException(getClass().getSimpleName() + " - \"update_interval\" must be a whole "
 					+ "number of seconds when devices or edge servers move: the framework keeps their positions by "
 					+ "the second");
-		world.strategy().initialize(world);
+		world.strategy().initialize();
 		boolean display = SimulationParameters.displayRealTimeCharts && !SimulationParameters.parallelism_enabled;
 		if (display || SimulationParameters.saveCharts)
 			deploymentChart = new DeploymentChart(this);
@@ -144,31 +128,27 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 	@Override
 	public void processEvent(Event ev) {
 		switch (ev.getTag()) {
-		case DEPLOYMENT_DONE:
-			deploymentDone((Deployment) ev.getData());
-			return;
 		case SAMPLE:
 			world.metrics.sample();
 			schedule(this, world.config.sampleInterval, SAMPLE);
 			return;
 		case MOBILITY:
-			if (world.config.serversMove())
+			if (world.config.serversMove()) {
+				// Servers that lost their group join another first, so that the mesh
+				// follows the groups as they are now.
+				world.injector.transferServers();
 				world.creator.updateMesh();
+			}
 			world.updateAttachments();
 			schedule(this, SimulationParameters.updateInterval, MOBILITY);
 			return;
 		case TRANSFER_RESULTS_TO_ORCH:
-			Task executed = (Task) ev.getData();
-			Service service = world.services().get(executed.getApplicationID());
-			// A stage of an edge pipeline hands its output to the next one where it ran.
-			boolean handsOver = service.edgePipeline && !executed.getDependents().isEmpty();
-			if (handsOver || !service.returnsResults) {
-				executedAndForgotten(executed, service.edgePipeline);
-				return;
-			}
-			break;
-		case RESULT_RETURN_FINISHED:
-			world.metrics.resultsReceived++;
+			// A node finished running an attempt.
+			world.engine.executed((Task) ev.getData());
+			return;
+		case PRINT_LOG:
+			// Every task is judged at the end, done or not: the run ends now.
+			tasksCount = simLog.getGeneratedTasks();
 			break;
 		default:
 			break;
@@ -176,200 +156,30 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 		super.processEvent(ev);
 	}
 
-	/**
-	 * Ends a task where it ran: the device expects nothing back from it, so it has
-	 * succeeded once it has run on its host before its deadline, and no result is
-	 * sent.
-	 *
-	 * @param task   the task that just finished running
-	 * @param onEdge whether the tasks that wait for it are sent from its host,
-	 *               rather than by the device
-	 */
-	private void executedAndForgotten(Task task, boolean onEdge) {
-		finishedTasks.add(task);
-		if (taskFailed(task, 2))
-			return;
-		simLog.getTasksExecutionInfos(task);
-		// The deadline is checked as at the return of a result, on the delay so far.
-		if (taskFailed(task, 3))
-			return;
-		edgeOrchestrator.resultsReturned(task);
+	/** A device created a task: the strategy takes it from here. */
+	@Override
+	protected void sendTaskToOrchestrator(Task task) {
+		registerRequest(task);
+		simLog.incrementTasksSent();
+		world.engine.created(task);
+	}
+
+	/** Counts a task that is done, for the progress bar of the framework. */
+	void jobDone() {
 		tasksCount++;
-		if (onEdge)
-			releaseDependentsOnEdge(task);
-		else
-			releaseDependents(task);
-		requestTaskFinished(task, false);
 	}
 
 	/**
-	 * Sends the stages that waited for a task from the host it ran on, with its
-	 * output added to what they carry: the edge pipeline. A stage with several
-	 * inputs leaves from the host of the last one to finish.
-	 *
-	 * @param task the stage that just ran
-	 */
-	private void releaseDependentsOnEdge(Task task) {
-		for (Task next : task.getDependents()) {
-			if (isTerminal(next))
-				continue;
-			next.setFileSizeInBits((long) (next.getFileSizeInBits() + task.getOutputSizeInBits()));
-			if (!next.dependencyFinished())
-				continue;
-			next.setTime(simulation.clock());
-			registerRequest(next);
-			if (taskFailed(next, 0))
-				continue;
-			ComputingNode device = next.getEdgeDevice();
-			next.setOrchestrator(world.homeOf(device).node);
-			simLog.incrementTasksSent();
-			sentTasks++;
-			TestbedWorld.Placement placement = world.placementOf(device);
-			if (!device.isApplicationPlaced() || placement == null) {
-				// The service was moved away meanwhile: deploy it again first.
-				sendFromOrchToDestination(next);
-				continue;
-			}
-			ComputingNode destination = destination(next, placement);
-			next.setOffloadingDestination(destination);
-			simLog.taskSentFromOrchToDest(next);
-			((TestbedNetworkModel) getNetworkModel()).sendBetweenHosts(task.getOffloadingDestination(), destination,
-					next);
-		}
-	}
-
-	/**
-	 * @param task      a task
-	 * @param placement where the service of its device runs
-	 * @return the node the strategy sends this task to: the host of the placement,
-	 *         unless the strategy routes the task elsewhere
-	 */
-	private ComputingNode destination(Task task, TestbedWorld.Placement placement) {
-		ComputingNode routed = world.strategy().route(task, placement);
-		return routed == null ? placement.node(world) : routed;
-	}
-
-	@Override
-	protected void sendFromOrchToDestination(Task task) {
-		if (taskFailed(task, 1))
-			return;
-		ComputingNode device = task.getEdgeDevice();
-		TestbedWorld.Placement placement = world.placementOf(device);
-		if (device.isApplicationPlaced() && placement != null) {
-			forward(task, destination(task, placement));
-			return;
-		}
-		waitingSince.put(task, simulation.clock());
-		List<Task> queue = waiting.get(device);
-		if (queue != null) {
-			queue.add(task);
-			return;
-		}
-		queue = new ArrayList<>();
-		queue.add(task);
-		waiting.put(device, queue);
-
-		world.release(device);
-		Deployment deployment = world.strategy().deploy(device, world.homeOf(device),
-				world.services().get(task.getApplicationID()));
-		world.metrics.deployment(deployment);
-		if (deployment.success())
-			world.place(deployment);
-		schedule(this, deployment.delay, DEPLOYMENT_DONE, deployment);
-	}
-
-	private void deploymentDone(Deployment deployment) {
-		ComputingNode device = deployment.device;
-		List<Task> queue = waiting.remove(device);
-		ComputingNode destination = !deployment.success() ? ComputingNode.NULL
-				: deployment.onCloud ? world.cloud() : deployment.host.node;
-		if (deployment.success()) {
-			device.setApplicationPlacementLocation(destination);
-			device.setApplicationPlaced(true);
-		}
-		// The placement is gone when the device or the strategy moved the service
-		// away during the deployment: these tasks still go where it was made.
-		TestbedWorld.Placement placement = world.placementOf(device);
-		for (Task task : queue) {
-			task.addActualNetworkTime(simulation.clock() - waitingSince.remove(task));
-			if (!deployment.success()) {
-				task.setFailureReason(Task.FailureReason.NO_OFFLOADING_DESTINATIONS);
-				simLog.incrementTasksFailedLackOfRessources(task);
-				failedTasksCount++;
-				tasksCount++;
-				failDependents(task);
-				requestTaskFinished(task, true);
-				continue;
-			}
-			if (!taskFailed(task, 1))
-				forward(task, placement == null ? destination : destination(task, placement));
-		}
-	}
-
-	private void forward(Task task, ComputingNode destination) {
-		task.setOffloadingDestination(destination);
-		simLog.taskSentFromOrchToDest(task);
-		scheduleNow(getNetworkModel(), NetworkModel.SEND_REQUEST_FROM_ORCH_TO_DESTINATION, task);
-	}
-
-	/**
-	 * Fails a task whose transfer found no path, or lost the one it had.
-	 *
-	 * @param task  the task
-	 * @param phase 1 when it was lost before it ran, 3 when its result was
-	 */
-	void failOnNetwork(Task task, int phase) {
-		task.setFailureReason(Task.FailureReason.FAILED_DUE_TO_NETWORK_OUTAGE);
-		if (phase == 3)
-			world.metrics.losingResult(task);
-		simLog.incrementTasksFailed(task);
-		setFailed(task, phase);
-	}
-
-	/**
-	 * Fails a task, and lets the strategy decide what becomes of the placement.
-	 * <p>
-	 * The framework forgets where the application of a device is placed whenever
-	 * one of its tasks fails, for any reason, a missed deadline included, so the
-	 * next task deploys it again. Here that is the strategy's decision.
-	 */
-	@Override
-	protected boolean setFailed(Task task, int phase) {
-		ComputingNode device = task.getEdgeDevice();
-		TestbedWorld.Placement placement = world.placementOf(device);
-		boolean placed = device.isApplicationPlaced();
-		super.setFailed(task, phase);
-		if (placement != null && world.placementOf(device) == placement
-				&& !world.strategy().taskFailed(task, placement) && placed)
-			device.setApplicationPlaced(true);
-		return true;
-	}
-
-	/**
-	 * Lets an access server send work to any edge server it can reach.
-	 * <p>
 	 * The framework fails a task as moved away when its orchestrator and its
 	 * destination are two edge data centers further apart than a device's radio
-	 * range, which assumes edge offloading is local. The strategies deploy across
-	 * the mesh, and whether the destination can be reached is decided by the live
-	 * topology, so two edge servers are always at the same place here.
+	 * range. Whether a node can be reached is decided by the live topology here.
 	 */
 	@Override
 	protected boolean sameLocation(ComputingNode a, ComputingNode b) {
-		// A device and its access server too: the radio link between them is on the
-		// live topology, which knows whether the device is in range.
 		if (a.getType() == SimulationParameters.TYPES.EDGE_DATACENTER
 				|| b.getType() == SimulationParameters.TYPES.EDGE_DATACENTER)
 			return true;
 		return super.sameLocation(a, b);
-	}
-
-	@Override
-	protected void requestTaskFinished(Task task, boolean failed) {
-		world.metrics.taskFinished(task, failed);
-		if (!failed && task.getStatus() != Task.Status.SKIPPED)
-			world.strategy().taskCompleted(task, world.placementOf(task.getEdgeDevice()));
-		super.requestTaskFinished(task, failed);
 	}
 
 	// --------------------------------------------------------------- output
@@ -411,58 +221,62 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 	public void onSimulationEnd() {
 		TestbedMetrics metrics = world.metrics;
 		metrics.sample();
+		TaskEngine engine = world.engine;
+		engine.closeLedger();
 		TestbedNetworkModel network = (TestbedNetworkModel) getNetworkModel();
+		Map<String, Double> kpis = metrics.summary();
 		String name = getClass().getSimpleName();
-		int tasks = metrics.tasksOk + metrics.tasksFailed;
-		SimLog.println("%s - %s, %s, %d devices, %d edge servers: %d tasks, %d succeeded, %d failed (%.1f%% "
-				+ "succeeded; %.1f%% while the edge layer was whole)", name, scenario.getStringOrchAlgorithm(),
+		SimLog.println("%s - %s, %s, %d devices, %d edge servers: %.0f tasks judged (%.0f censored)", name,
+				scenario.getStringOrchAlgorithm(),
 				world.config.mixedDelivery() ? "delivery set per service"
 						: world.config.returnResults ? "results returned to the device" : "fire and forget",
-				scenario.getDevicesCount(), world.servers().size(), tasks, metrics.tasksOk, metrics.tasksFailed,
-				percent(metrics.tasksOk, tasks), percent(metrics.healthyOk, metrics.healthyOk + metrics.healthyFailed));
-		SimLog.println("%s -   failed tasks: %d, of which %d while the edge layer was whole and %d during a "
-				+ "partition; %d lost on the way to their host, %d lost with their result on the way back; %d results "
-				+ "reached their device", name, metrics.tasksFailed, metrics.healthyFailed,
-				metrics.tasksFailed - metrics.healthyFailed, metrics.lostOnRequest, metrics.lostOnResult,
-				metrics.resultsReceived);
-		SimLog.println("%s -   failures by reason: %s (whole layer: %s)", name,
-				TestbedMetrics.reasons(metrics.failures), TestbedMetrics.reasons(metrics.healthyFailures));
-		for (TestbedWorld.DeviceType type : world.deviceTypes()) {
-			TestbedMetrics.TypeRecord record = metrics.byType.getOrDefault(type.name, new TestbedMetrics.TypeRecord());
-			int total = record.ok + record.failed;
-			SimLog.println("%s -   %-17s -> %-22s %5d tasks, %4d failed (%5.1f%% succeeded), served by edge "
-					+ "%5.1f%% / cloud %5.1f%%, delay mean %.0f ms, median %.0f ms, 95th %.0f ms, 99th %.0f ms; "
-					+ "failures: %s", name, type.name,
-					world.services().get(type.application).name, total, record.failed, percent(record.ok, total),
-					percent(record.edge, record.ok), percent(record.cloud, record.ok),
-					record.ok == 0 ? Double.NaN : 1000 * record.delay / record.ok,
-					1000 * TestbedMetrics.percentile(record.delays, 0.5),
-					1000 * TestbedMetrics.percentile(record.delays, 0.95),
-					1000 * TestbedMetrics.percentile(record.delays, 0.99), TestbedMetrics.reasons(record.reasons));
+				scenario.getDevicesCount(), world.servers().size(), kpis.get("tasks"), kpis.get("tasks_censored"));
+		SimLog.println("%s -   requirement met %.2f%% (during partitions %.2f%%, otherwise %.2f%%; deadline "
+				+ "services %.2f%%, lossless services %.2f%%)", name, kpis.get("requirement_met_pct"),
+				kpis.get("requirement_met_partitioned_pct"), kpis.get("requirement_met_healthy_pct"),
+				kpis.get("deadline_met_pct"), kpis.get("lossless_met_pct"));
+		SimLog.println("%s -   on time %.2f%%, late %.2f%%, lost %.2f%%; delay median %.0f ms, 95th %.0f ms, "
+				+ "99th %.0f ms", name, kpis.get("on_time_pct"), kpis.get("late_pct"), kpis.get("lost_pct"),
+				kpis.get("delay_p50_ms"), kpis.get("delay_p95_ms"), kpis.get("delay_p99_ms"));
+		for (Service service : world.services()) {
+			Double met = kpis.get("met_pct[" + service.name.replace(',', ' ') + "]");
+			if (met != null)
+				SimLog.println("%s -   %-24s %-8s requirement met %6.2f%%%s", name, service.name, service.requirement(),
+						met, Double.isNaN(service.targetPct) ? ""
+								: String.format(Locale.ROOT, " (target %.1f%%: %s)", service.targetPct,
+										met >= service.targetPct ? "reached" : "missed"));
 		}
-		SimLog.println("%s -   %d deployments, %d failed, %d on the cloud, median %.1f ms, 95th percentile %.1f ms; "
-				+ "%d transfers lost to a link down", name, metrics.deployments, metrics.deploymentFailures,
-				metrics.cloudDeployments, metrics.deploymentLatencyPercentile(0.5) * 1000,
-				metrics.deploymentLatencyPercentile(0.95) * 1000, network.lostTransfers);
+		StringBuilder exposures = new StringBuilder();
+		for (Job.Exposure exposure : Job.Exposure.values()) {
+			String key = exposure.name().toLowerCase(Locale.ROOT);
+			exposures.append(exposures.length() == 0 ? "" : "; ").append(key).append(' ')
+					.append(kpis.get("exposed_" + key + "_tasks").intValue()).append(" tasks, ")
+					.append(String.format(Locale.ROOT, "%.1f%% met", kpis.get("exposed_" + key + "_met_pct")));
+		}
+		SimLog.println("%s -   exposed: %s", name, exposures);
+		SimLog.println("%s -   cost: %.2f attempts per task, %.1f%% of the runs redundant, %d instances started (%d "
+				+ "refused for memory), %.0f MB of instances per server, %.2f kbit/s of control traffic per server; "
+				+ "lost on the network: %d messages, %d tasks or results (%d transfers)", name,
+				kpis.get("attempts_per_task"), kpis.get("redundant_runs_pct"), engine.instancesStarted,
+				engine.instancesRefused, kpis.get("instance_memory_mb_per_server"), kpis.get("control_kbps_per_server"),
+				engine.controlLost, engine.dataLost, network.lostTransfers);
 		for (String line : world.strategy().reportLines())
 			SimLog.println("%s -   %s", name, line);
-		SimLog.println("%s -   random failures: %d links, %d cloud uplinks, %d servers", name, injector.linkFailures,
-				injector.wanFailures, injector.nodeFailures);
-		SimLog.println("%s -   %d devices attached to another access server", name, metrics.handovers);
-		for (TestbedWorld.ActivePartition partition : world.activePartitions())
-			metrics.partitionEnded(partition, simulation.clock());
+		SimLog.println("%s -   random failures: %d links, %d cloud uplinks, %d servers (%s)", name,
+				injector.linkFailures, injector.wanFailures, injector.nodeFailures,
+				world.config.nodeCrash ? "crash" : "isolate");
+		SimLog.println("%s -   %d devices attached to another access server; %d servers and devices changed "
+				+ "partition group, %d joins refused", name, metrics.handovers, metrics.groupTransfers,
+				kpis.get("joins_refused").intValue());
 		for (String row : metrics.partitionRows()) {
 			String[] cells = row.split(",");
-			int ok = Integer.parseInt(cells[9]);
-			int failed = Integer.parseInt(cells[10]);
 			SimLog.println("%s -   partition %s group %s: %s servers, %s devices, cloud from %s of %s access "
-					+ "servers: %d tasks, %d failed (%.1f%% succeeded), %s deployments (%s failed); failures: %s", name,
-					cells[0], cells[3], cells[4], cells[6], cells[8], cells[5], ok + failed, failed,
-					percent(ok, ok + failed), cells[11], cells[12], cells[13]);
+					+ "servers: %s tasks, requirement met %s%%, lost %s%%; servers +%s -%s, devices +%s -%s", name,
+					cells[0], cells[3], cells[4], cells[6], cells[8], cells[5], cells[9], cells[10], cells[11],
+					cells[12], cells[13], cells[14], cells[15]);
 		}
 		snapshot("end");
-		Testbed.record(scenario.getStringOrchAlgorithm() + "," + scenario.getDevicesCount() + "," + delivery(),
-				metrics.summary());
+		Testbed.record(scenario.getStringOrchAlgorithm() + "," + scenario.getDevicesCount() + "," + delivery(), kpis);
 		String label = label();
 		try {
 			metrics.write(Path.of(SimulationParameters.outputFolder), label);
@@ -472,7 +286,8 @@ public class TestbedSimulationManager extends DefaultSimulationManager implement
 		}
 	}
 
-	private static double percent(int part, int whole) {
-		return whole == 0 ? Double.NaN : 100.0 * part / whole;
+	/** @return the tasks of this run */
+	List<Job> jobs() {
+		return world.engine.jobs();
 	}
 }

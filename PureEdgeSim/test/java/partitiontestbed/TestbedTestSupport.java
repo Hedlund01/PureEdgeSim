@@ -76,7 +76,7 @@ public abstract class TestbedTestSupport extends AbstractTest {
 	protected String run(String algorithm) throws Exception {
 		Path output = Path.of(TEST_OUTPUT);
 		Files.createDirectories(output);
-		for (String kind : List.of("timeline", "partitions", "deployments", "device_types", "failures"))
+		for (String kind : List.of("timeline", "partitions", "tasks", "device_types", "flocky_deployments"))
 			Files.deleteIfExists(output.resolve(label(algorithm) + "_" + kind + ".csv"));
 		String parameters = Files.readString(Path.of(TEST_SETTINGS + "simulation_parameters.properties"))
 				.replaceAll("(?m)^orchestration_algorithms=.*$", "orchestration_algorithms=" + algorithm);
@@ -152,6 +152,11 @@ public abstract class TestbedTestSupport extends AbstractTest {
 		return Double.parseDouble(row.get(column));
 	}
 
+	/** @return the rows of the tasks file of a run whose outcome is the given one */
+	protected static long outcomes(List<Map<String, String>> tasks, String outcome) {
+		return tasks.stream().filter(row -> outcome.equals(row.get("outcome"))).count();
+	}
+
 	/** Reads the count the report printed just before the given words. */
 	protected static int reported(String console, String words) {
 		Matcher matcher = Pattern.compile("(\\d+) " + words).matcher(console);
@@ -160,11 +165,40 @@ public abstract class TestbedTestSupport extends AbstractTest {
 		return Integer.parseInt(matcher.group(1));
 	}
 
-	/** Reads the overall success rate the report printed. */
+	/** Reads the share of the tasks that met their requirement, as the report printed it. */
 	protected static double successRate(String console) {
-		Matcher matcher = Pattern.compile("failed \\(([0-9.,]+)% succeeded;").matcher(console);
+		return percent(console, "requirement met");
+	}
+
+	/**
+	 * Reads a percentage the report printed just after the given words.
+	 *
+	 * @param console what the run printed
+	 * @param words   the words before the number, for example {@code lost}
+	 * @return the first such percentage
+	 */
+	protected static double percent(String console, String words) {
+		Matcher matcher = Pattern.compile(words + " ([0-9.,]+|NaN)%").matcher(console);
 		if (!matcher.find())
-			throw new AssertionError("no testbed report in the output");
-		return Double.parseDouble(matcher.group(1).replace(',', '.'));
+			throw new AssertionError("the report does not say " + words);
+		String value = matcher.group(1).replace(',', '.');
+		return "NaN".equals(value) ? Double.NaN : Double.parseDouble(value);
+	}
+
+	/**
+	 * Reads how many tasks met a kind of trouble, and the share of them that still
+	 * met their requirement, from the report.
+	 *
+	 * @param console  what the run printed
+	 * @param exposure for example {@code device_detached}
+	 * @return the number of tasks and the share, NaN when there were none
+	 */
+	protected static double[] exposure(String console, String exposure) {
+		Matcher matcher = Pattern.compile(exposure + " (\\d+) tasks, ([0-9.,]+|NaN)% met").matcher(console);
+		if (!matcher.find())
+			throw new AssertionError("the report says nothing of " + exposure);
+		String share = matcher.group(2).replace(',', '.');
+		return new double[] { Integer.parseInt(matcher.group(1)),
+				"NaN".equals(share) ? Double.NaN : Double.parseDouble(share) };
 	}
 }

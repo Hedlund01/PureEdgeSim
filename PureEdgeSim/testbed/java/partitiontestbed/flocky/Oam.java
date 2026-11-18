@@ -48,7 +48,7 @@ public final class Oam {
 		public final WorkloadType workload;
 		/** Traits the server must advertise, beyond those of the service. */
 		public final Set<Trait> required;
-		/** Memory reserved on the server while one instance runs, in megabytes. */
+		/** Memory reserved on the server while one instance runs, in megabytes: the service's footprint. */
 		public final double memory;
 
 		Definition(int id, Service service, String name, WorkloadType workload, Set<Trait> required, double memory) {
@@ -119,11 +119,11 @@ public final class Oam {
 				for (int i = 0; i < config.implementationsPerService; i++) {
 					boolean unikernel = random.nextDouble() < config.unikernelProbability;
 					Set<Trait> traits = unikernel ? EnumSet.of(Trait.SECURE_RUNTIME) : EnumSet.noneOf(Trait.class);
-					double memory = config.minDefinitionMemory
-							+ random.nextDouble() * (config.maxDefinitionMemory - config.minDefinitionMemory);
+					// The footprint of an instance is the testbed's, the same for every
+					// strategy: the definitions of a service differ by their runtime only.
 					catalog.definitions.add(new Definition(catalog.definitions.size(), service,
 							"C" + service.id + "." + (i + 1), unikernel ? WorkloadType.UNIKERNEL : WorkloadType.CONTAINER,
-							traits, Math.round(memory)));
+							traits, service.memory));
 				}
 			return catalog;
 		}

@@ -2,11 +2,13 @@ package partitiontestbed;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -23,23 +26,27 @@ import org.junit.jupiter.api.Test;
 import com.mechalikh.pureedgesim.datacentersmanager.ComputingNode;
 import com.mechalikh.pureedgesim.network.InfrastructureGraph;
 import com.mechalikh.pureedgesim.network.NetworkLink;
+import com.mechalikh.pureedgesim.taskgenerator.DefaultTask;
 
 import partitiontestbed.TestbedConfig.GroupMode;
 import partitiontestbed.TestbedConfig.PartitionSpec;
+import partitiontestbed.baselines.AccessServerStrategy;
+import partitiontestbed.baselines.CloudOnlyStrategy;
+import partitiontestbed.baselines.ReplicatedStrategy;
 
 /**
  * Tests the testbed itself: its configuration, what a partition and a failure do
- * to the network, the device types, the delivery modes, and that every strategy
- * faces the same conditions. The runs use {@link AccessServerStrategy}, so that
- * nothing here depends on Flocky.
+ * to the network, how a task is judged, the messages of a strategy, and that
+ * every strategy faces the same conditions and the same tasks. The runs use the
+ * baseline strategies, so that nothing here depends on Flocky.
  */
 class TestbedTest extends TestbedTestSupport {
 
 	private static final String ACCESS = AccessServerStrategy.NAME;
 
 	@BeforeEach
-	void registerTheTestStrategy() {
-		AccessServerStrategy.register();
+	void registerTheTestStrategies() {
+		MessengerStrategy.register();
 	}
 
 	// ---------------------------------------------------------- configuration
@@ -49,6 +56,9 @@ class TestbedTest extends TestbedTestSupport {
 		testbed("edge_nodes", "33");
 		testbed("partition.1.cloud", "none");
 		testbed("services.3.traits", "ATTESTATION");
+		testbed("services.1.requirement", "lossless");
+		testbed("services.1.delivery_window_s", "90");
+		testbed("services.2.memory_mb", "128");
 		TestbedConfig config = new TestbedConfig(TEST_SETTINGS + "testbed.properties");
 
 		assertEquals(33, config.edgeNodes, "a testbed.* property wins over the file");
@@ -56,6 +66,13 @@ class TestbedTest extends TestbedTestSupport {
 		assertTrue(config.serviceTraits(0).isEmpty(), "a stateless task asks for no trait");
 		assertEquals(Set.of(Trait.ATTESTATION), config.serviceTraits(3), "an intent can still be given");
 		assertTrue(config.returnResults);
+		assertFalse(config.lossless(0), "a task must be on time unless its service says otherwise");
+		assertTrue(config.lossless(1));
+		assertEquals(90, config.deliveryWindow(1), 1e-12);
+		assertEquals(60, config.deliveryWindow(0), 1e-12, "the window of the common file");
+		assertEquals(128, config.instanceMemory(2), 1e-12);
+		assertEquals(0.5, config.instanceStartup(2), 1e-12, "startup in ms is kept in seconds");
+		assertFalse(config.nodeCrash, "a failed server is cut off unless crash is asked for");
 
 		assertEquals(1, config.partitions.size());
 		PartitionSpec partition = config.partitions.get(0);
@@ -97,8 +114,10 @@ class TestbedTest extends TestbedTestSupport {
 		assertInvalid("partition.1.cloud", "0,1", "the one group that keeps the cloud");
 		assertInvalid("partition.1.groups", "geo:0", "partition.1.groups");
 		assertInvalid("services.1.traits", "TELEPORTATION", "unknown trait");
+		assertInvalid("services.1.requirement", "sometimes", "deadline or lossless");
 		assertInvalid("traits.GREEN_ENERGY", "1.5", "traits.GREEN_ENERGY");
 		assertInvalid("tasks.delivery", "sometimes", "result or fire_and_forget");
+		assertInvalid("failures.node_failure_mode", "explode", "isolate or crash");
 		assertInvalid("edge_nodes", "12.5", "whole number");
 	}
 
@@ -106,8 +125,67 @@ class TestbedTest extends TestbedTestSupport {
 	void anUnknownAlgorithmNamesTheKnownOnes() {
 		IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
 				() -> Testbed.strategy("NOT_A_STRATEGY"));
-		assertTrue(error.getMessage().contains("FLOCKY_LATENCY") && error.getMessage().contains(ACCESS),
-				error.getMessage());
+		for (String name : List.of("FLOCKY_LATENCY", ACCESS, CloudOnlyStrategy.NAME, "RETRY", ReplicatedStrategy.NAME))
+			assertTrue(error.getMessage().contains(name), error.getMessage());
+	}
+
+	// ------------------------------------------------------------ judging
+
+	@Test
+	void aLosslessServiceCountsALateTaskAndADeadlineServiceDoesNot() {
+		Service deadline = new Service(0, "AR", Set.of(), true, false, false, 60, Double.NaN, 512, 0.5);
+		Service lossless = new Service(1, "Telemetry", Set.of(), true, false, true, 60, 99, 512, 0.5);
+		ComputingNode device = mock(ComputingNode.class);
+		ComputingNode host = mock(ComputingNode.class);
+		when(host.getType()).thenReturn(com.mechalikh.pureedgesim.scenariomanager.SimulationParameters.TYPES.EDGE_DATACENTER);
+
+		Job late = job(deadline, device, 0, 1);
+		late.done(5, new Attempt(late, host, host));
+		assertEquals(Job.Outcome.LATE, late.outcome(100), "done after its deadline, within the window");
+		assertFalse(late.met(100), "a deadline service needs it on time");
+		Job lateLossless = job(lossless, device, 0, 1);
+		lateLossless.done(5, new Attempt(lateLossless, host, host));
+		assertTrue(lateLossless.met(100), "a lossless one only needs it done");
+
+		Job onTime = job(deadline, device, 10, 1);
+		onTime.done(10.5, new Attempt(onTime, host, host));
+		assertEquals(Job.Outcome.ON_TIME, onTime.outcome(100));
+		assertTrue(onTime.met(100));
+
+		Job tooLate = job(lossless, device, 0, 1);
+		tooLate.done(70, new Attempt(tooLate, host, host));
+		assertEquals(Job.Outcome.LOST, tooLate.outcome(100), "done after its window is as good as lost");
+		assertFalse(tooLate.met(100));
+
+		Job never = job(lossless, device, 20, 1);
+		assertEquals(Job.Outcome.LOST, never.outcome(100), "not done, and its window ran out");
+		Job unknown = job(lossless, device, 50, 1);
+		assertEquals(Job.Outcome.CENSORED, unknown.outcome(100), "not done, but its window outlasts the run");
+		assertNull(unknown.met(100), "so it is not judged");
+	}
+
+	private static Job job(Service service, ComputingNode device, double created, double deadline) {
+		DefaultTask task = new DefaultTask((int) (created * 1000));
+		task.setMaxLatency(deadline);
+		return new Job(task, device, service, created, false);
+	}
+
+	@Test
+	void noStrategyOfTheTestbedSeesTheNetworkAsTheTestbedDoes() throws IOException {
+		Path strategies = Path.of("PureEdgeSim/testbed/java/partitiontestbed");
+		List<Path> files;
+		try (Stream<Path> walk = Files.walk(strategies)) {
+			files = walk.filter(file -> file.toString().endsWith(".java")
+					&& (file.getParent().endsWith("baselines") || file.getParent().endsWith("flocky")))
+					.collect(Collectors.toList());
+		}
+		assertTrue(files.size() >= 8, "the baselines and Flocky: " + files);
+		for (Path file : files) {
+			String source = Files.readString(file);
+			for (String oracle : List.of("LiveTopology", "TestbedWorld", "topology()", "TaskEngine"))
+				assertFalse(source.contains(oracle), file + " uses " + oracle
+						+ ": a strategy learns about the network only through its own messages");
+		}
 	}
 
 	// -------------------------------------------------------------- network
@@ -137,6 +215,20 @@ class TestbedTest extends TestbedTestSupport {
 
 		topology.restore(List.of(ab, ba));
 		assertEquals(0.002, topology.latency(a, b), 1e-12, "the cut heals");
+	}
+
+	@Test
+	@Tag("integration")
+	void aMessageAcrossAPartitionNeverArrivesAndOneSentAfterItDoes() throws Exception {
+		String console = run(MessengerStrategy.NAME);
+		assertFalse(console.contains("unexpected error"), console);
+
+		assertEquals(1, MessengerStrategy.delivered.size(), "only one of the two messages arrives");
+		double[] arrival = MessengerStrategy.delivered.get(0);
+		assertEquals(200, arrival[0], 1e-9, "the one sent after the partition healed");
+		assertTrue(arrival[1] > 200, "after its transfer time: " + arrival[1]);
+		assertEquals(List.of(120.0), MessengerStrategy.timedOut, "the call across the cut times out");
+		assertEquals(List.of(200.0), MessengerStrategy.replied, "the call after it gets its reply");
 	}
 
 	@Test
@@ -176,13 +268,12 @@ class TestbedTest extends TestbedTestSupport {
 		assertEquals(0, number(groups.get(1), "devices"), "the group that keeps the cloud has no device");
 		assertEquals(0, number(groups.get(2), "devices"));
 		assertEquals(0, number(groups.get(0), "access_nodes_with_cloud"), "and the devices have no cloud");
-		assertEquals(0, number(groups.get(1), "tasks_ok") + number(groups.get(1), "tasks_failed"),
-				"a group without devices runs no task");
+		assertEquals(0, number(groups.get(1), "tasks"), "a group without devices has no task");
 	}
 
 	@Test
 	@Tag("integration")
-	void aTransferOnALinkThatGoesDownIsLostAsANetworkOutage() throws Exception {
+	void aServerThatFailsLosesTheTasksOnItsLinks() throws Exception {
 		// The access server of a device is also its host here, so only its own link
 		// carries its tasks: servers that fail cut it.
 		testbed("partition.1.enabled", "false");
@@ -190,13 +281,32 @@ class TestbedTest extends TestbedTestSupport {
 		testbed("failures.node_mean_repair_s", "20");
 		String console = run(ACCESS);
 
-		assertTrue(rows(ACCESS, "failures").stream()
-				.anyMatch(row -> "FAILED_DUE_TO_NETWORK_OUTAGE".equals(row.get("reason"))),
-				"tasks are lost with their link, and each one is in the failures file");
-		assertEquals(reported(console, "failed \\("), rows(ACCESS, "failures").size(),
-				"every failed task is in the failures file");
+		List<Map<String, String>> tasks = rows(ACCESS, "tasks");
+		assertTrue(outcomes(tasks, "lost") > 0, "tasks are lost with the link of their server");
+		assertTrue(exposure(console, "host_failed")[0] > 0, "and they are marked as having met a failed host");
 		assertTrue(rows(ACCESS, "timeline").stream().anyMatch(row -> number(row, "links_down") > 0),
 				"links went down");
+	}
+
+	@Test
+	@Tag("integration")
+	void aCrashedHostLosesWhatRanOnItAndACopyElsewhereSavesIt() throws Exception {
+		testbed("partition.1.enabled", "false");
+		testbed("failures.node_failure_rate_per_hour", "30");
+		testbed("failures.node_mean_repair_s", "20");
+		testbed("failures.node_failure_mode", "crash");
+		String single = run(ACCESS);
+		String copies = run(ReplicatedStrategy.NAME);
+
+		double[] alone = exposure(single, "host_failed");
+		double[] replicated = exposure(copies, "host_failed");
+		assertTrue(alone[0] > 0 && replicated[0] > 0, "hosts crash under both");
+		assertTrue(replicated[1] > alone[1],
+				"a copy on a neighbour saves tasks whose host crashed: " + alone[1] + "% -> " + replicated[1] + "%");
+		List<Map<String, String>> tasks = rows(ReplicatedStrategy.NAME, "tasks");
+		assertTrue(tasks.stream().mapToDouble(row -> number(row, "duplicates")).sum() > 0,
+				"and the second result of a task is a duplicate");
+		assertEquals(rows(ACCESS, "tasks").size(), tasks.size(), "which counts once: the same tasks are judged");
 	}
 
 	// -------------------------------------------------------------- devices
@@ -205,10 +315,10 @@ class TestbedTest extends TestbedTestSupport {
 	@Tag("integration")
 	void everyDeviceTypeCallsOnlyItsOwnApplication() throws Exception {
 		testbed("partition.1.enabled", "false");
-		String console = run(ACCESS);
+		run(ACCESS);
 
 		Map<String, Set<String>> applications = new HashMap<>();
-		for (Map<String, String> row : rows(ACCESS, "deployments"))
+		for (Map<String, String> row : rows(ACCESS, "tasks"))
 			applications.computeIfAbsent(row.get("device_type"), type -> new HashSet<>()).add(row.get("service"));
 		assertEquals(Map.of("IoT sensor", Set.of("Sensor telemetry"), "Security camera", Set.of("Video analytics"),
 				"Smartphone", Set.of("AR assistant"), "Payment terminal", Set.of("Payment authorization")),
@@ -218,23 +328,20 @@ class TestbedTest extends TestbedTestSupport {
 		assertEquals(4, types.size());
 		assertEquals(DEVICES, types.stream().mapToDouble(row -> number(row, "devices")).sum(), 1e-9,
 				"every device has a type");
-		Map<String, String> sensors = types.get(0);
-		assertEquals("IoT sensor", sensors.get("device_type"));
-		assertEquals(number(sensors, "tasks_ok"), number(sensors, "served_by_edge") + number(sensors, "served_by_cloud"),
-				1e-9, "a sensor has no processor, so every task it sends is served by an edge server or the cloud");
-		assertFalse(console.contains("FAILED_DUE_TO_NETWORK_OUTAGE"), "nothing is lost on a whole network");
+		for (Map<String, String> type : types)
+			assertEquals(0, number(type, "lost_pct"), 1e-9, "nothing is lost on a whole network: " + type);
 	}
 
 	@Test
 	@Tag("integration")
-	void aFireAndForgetTaskIsDoneWhereItRunsAndNoResultCrossesTheNetwork() throws Exception {
+	void aFireAndForgetTaskIsDoneWhereItRuns() throws Exception {
 		testbed("tasks.delivery", "fire_and_forget");
 		String console = run(ACCESS);
 
 		assertTrue(console.contains("fire and forget"));
-		assertEquals(0, reported(console, "results reached their device"), "the devices expect nothing back");
-		assertEquals(0, reported(console, "lost with their result"), "so no task can be lost on the way back");
-		assertTrue(rows(ACCESS, "failures").stream().noneMatch(row -> "result".equals(row.get("lost_on"))));
+		List<Map<String, String>> tasks = rows(ACCESS, "tasks");
+		assertTrue(tasks.stream().allMatch(row -> row.get("host").isEmpty() == row.get("done_s").isEmpty()),
+				"a task is done where it ran, and nothing returns to the device");
 		assertTrue(Files.exists(Path.of(TEST_OUTPUT, "testbed_" + ACCESS + "_40_devices_fire_and_forget_timeline.csv")),
 				"the files are named after the mode");
 	}
@@ -243,18 +350,21 @@ class TestbedTest extends TestbedTestSupport {
 
 	@Test
 	@Tag("integration")
-	void everyStrategyFacesTheSamePartitionsAndTheSameFailures() throws Exception {
+	void everyStrategyFacesTheSamePartitionsTheSameFailuresAndTheSameTasks() throws Exception {
 		testbed("partition.1.groups", "random:3");
 		testbed("partition.1.cloud", "random");
 		testbed("failures.link_failure_rate_per_hour", "20");
 		String access = run(ACCESS);
-		String flocky = run("FLOCKY_LATENCY");
+		String cloud = run(CloudOnlyStrategy.NAME);
 
-		assertEquals(groupsOf(rows(ACCESS, "partitions")), groupsOf(rows("FLOCKY_LATENCY", "partitions")),
+		assertEquals(groupsOf(rows(ACCESS, "partitions")), groupsOf(rows(CloudOnlyStrategy.NAME, "partitions")),
 				"the same random groups, and the same group keeps the cloud, whatever the strategy drew");
-		assertEquals(failuresLine(access), failuresLine(flocky), "the same random failures");
+		assertEquals(failuresLine(access), failuresLine(cloud), "the same random failures");
 		assertEquals(column(rows(ACCESS, "timeline"), "links_down"),
-				column(rows("FLOCKY_LATENCY", "timeline"), "links_down"), "at the same times");
+				column(rows(CloudOnlyStrategy.NAME, "timeline"), "links_down"), "at the same times");
+		assertEquals(tasksOf(rows(ACCESS, "tasks")), tasksOf(rows(CloudOnlyStrategy.NAME, "tasks")),
+				"and the same tasks, judged however the strategy fared");
+		assertTrue(successRate(cloud) < successRate(access), "a strategy that needs the cloud loses more in a cut");
 	}
 
 	// -------------------------------------------------------------- helpers
@@ -272,7 +382,12 @@ class TestbedTest extends TestbedTestSupport {
 				.collect(Collectors.toList());
 	}
 
-	/** @return a column over the four scheduled minutes, before the run waits for the last tasks */
+	private static Set<String> tasksOf(List<Map<String, String>> tasks) {
+		return tasks.stream().map(row -> row.get("task") + "@" + row.get("device") + ":" + row.get("created_s"))
+				.collect(Collectors.toSet());
+	}
+
+	/** @return a column over the four scheduled minutes */
 	private static List<String> column(List<Map<String, String>> rows, String column) {
 		return rows.stream().filter(row -> number(row, "time_s") <= 240).map(row -> row.get(column))
 				.collect(Collectors.toList());

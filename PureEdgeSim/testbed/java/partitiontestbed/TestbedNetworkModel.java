@@ -14,28 +14,29 @@ import com.mechalikh.pureedgesim.simulationmanager.SimulationManager;
 import com.mechalikh.pureedgesim.taskgenerator.Task;
 
 /**
- * Routes every transfer over the links that are up at the moment it is sent,
- * and loses it when one of them goes down before it arrives.
+ * Moves the {@link Carrier}s of the testbed over the links that are up at the
+ * moment they are sent, and loses them when one of those links goes down before
+ * they arrive.
  * <p>
- * The default network model routes over the paths computed when the topology
- * was built, and assumes they exist. Here a transfer is routed on the live
- * topology instead: it takes the detour a failure leaves, and it fails at once,
- * with {@link Task.FailureReason#FAILED_DUE_TO_NETWORK_OUTAGE}, when there is no
- * path at all. A transfer already on its way when a link it still has to cross
- * goes down is failed when it would have arrived, as a connection that is never
- * acknowledged; a link it has already left can go down without harm.
+ * The default network model routes over the paths computed when the topology was
+ * built, and assumes they exist. Here a carrier is routed on the live topology: it
+ * takes the detour a failure leaves, and is lost at once when there is no path at
+ * all. A carrier already on its way when a link it still has to cross goes down is
+ * lost when it would have arrived, as a connection that is never acknowledged; a
+ * link it has already left can go down without harm. Nobody is told of a loss:
+ * the sender finds out, if at all, by its own timeouts.
  * <p>
- * A request lost before it ran is failed in phase 1 of the framework, a result
- * lost on its way back in phase 3, so that the framework releases what the task
- * held at its destination.
+ * Every link is shared by everything on it: the tasks, the results and the
+ * strategy's own messages.
  *
  * @see LiveTopology
+ * @see TaskEngine
  */
 public class TestbedNetworkModel extends DefaultNetworkModel {
 
-	/** Transfers in flight, and whether a link went down ahead of each. */
+	/** Carriers in flight, and whether a link went down ahead of each. */
 	private final Map<TransferProgress, Boolean> flights = new IdentityHashMap<>();
-	/** Transfers lost to a link that was down, for the report. */
+	/** Carriers lost to a link that was down, for the report. */
 	int lostTransfers;
 	private boolean listening;
 
@@ -50,19 +51,20 @@ public class TestbedNetworkModel extends DefaultNetworkModel {
 		return ((TestbedSimulationManager) simulationManager).getWorld();
 	}
 
-	@Override
-	public void send(ComputingNode from, ComputingNode to, Task task, double fileSize, TransferProgress.Type type) {
+	/** Puts a carrier on the live topology, or loses it when there is no path. */
+	void send(Carrier carrier) {
 		LiveTopology topology = world().topology();
 		if (!listening) {
 			topology.onLoss(this::markLostFlights);
 			listening = true;
 		}
-		GraphPath<ComputingNode, NetworkLink> path = topology.path(from, to);
+		GraphPath<ComputingNode, NetworkLink> path = topology.path(carrier.from, carrier.to);
 		if (path == null) {
-			lose(task, type);
+			lostTransfers++;
+			world().engine.lost(carrier);
 			return;
 		}
-		TransferProgress transfer = new TransferProgress(task, fileSize, type)
+		TransferProgress transfer = new TransferProgress(carrier, carrier.bytes * 8.0, TransferProgress.Type.REQUEST)
 				.setVertexList(new ArrayList<>(path.getVertexList()))
 				.setEdgeList(new ArrayList<>(path.getEdgeList()));
 		if (path.getEdgeList().isEmpty()) {
@@ -73,23 +75,12 @@ public class TestbedNetworkModel extends DefaultNetworkModel {
 		path.getEdgeList().get(0).addTransfer(transfer);
 	}
 
-	/**
-	 * Sends a task from the host of the stage before it, on the edge, straight to
-	 * its own host: the device is not on the way.
-	 *
-	 * @param from the node that holds the input of the task
-	 * @param to   the node that will run it
-	 * @param task the task
-	 */
-	void sendBetweenHosts(ComputingNode from, ComputingNode to, Task task) {
-		if (from != to)
-			send(from, to, task, task.getFileSizeInBits(), TransferProgress.Type.TASK);
-		else
-			executeTaskOrDownloadContainer(
-					new TransferProgress(task, task.getFileSizeInBits(), TransferProgress.Type.TASK));
+	@Override
+	public void send(ComputingNode from, ComputingNode to, Task task, double fileSize, TransferProgress.Type type) {
+		throw new IllegalStateException("TestbedNetworkModel - everything on the network is a carrier of the testbed");
 	}
 
-	/** Marks the transfers that still had to cross a link that just went down. */
+	/** Marks the carriers that still had to cross a link that just left the routes. */
 	private void markLostFlights() {
 		LiveTopology topology = world().topology();
 		for (Map.Entry<TransferProgress, Boolean> flight : flights.entrySet()) {
@@ -97,7 +88,7 @@ public class TestbedNetworkModel extends DefaultNetworkModel {
 				continue;
 			// The links a transfer has left are no longer in its list.
 			for (NetworkLink link : flight.getKey().getEdgeList())
-				if (!topology.carries(link)) {
+				if (!topology.routable(link)) {
 					flight.setValue(true);
 					break;
 				}
@@ -107,17 +98,12 @@ public class TestbedNetworkModel extends DefaultNetworkModel {
 	@Override
 	protected void transferFinished(TransferProgress transfer) {
 		Boolean lost = flights.remove(transfer);
+		Carrier carrier = (Carrier) transfer.getTask();
 		if (lost != null && lost) {
-			lose(transfer.getTask(), transfer.getTransferType());
+			lostTransfers++;
+			world().engine.lost(carrier);
 			return;
 		}
-		super.transferFinished(transfer);
-	}
-
-	private void lose(Task task, TransferProgress.Type type) {
-		lostTransfers++;
-		boolean executed = type == TransferProgress.Type.RESULTS_TO_ORCH
-				|| type == TransferProgress.Type.RESULTS_TO_DEV;
-		((TestbedSimulationManager) simulationManager).failOnNetwork(task, executed ? 3 : 1);
+		world().engine.arrived(carrier);
 	}
 }

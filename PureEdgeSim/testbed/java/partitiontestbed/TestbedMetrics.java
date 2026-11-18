@@ -6,38 +6,53 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.IdentityHashMap;
+import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 
 import com.mechalikh.pureedgesim.datacentersmanager.ComputingNode;
 import com.mechalikh.pureedgesim.scenariomanager.SimulationParameters.TYPES;
-import com.mechalikh.pureedgesim.taskgenerator.Task;
 
 /**
- * What the testbed measures, whatever the strategy, and the files it writes.
+ * What the testbed measures, the same way for every strategy, and the files it
+ * writes.
  * <p>
- * Five files per run, in the output folder, named after the algorithm, the
- * number of devices and the delivery mode of the iteration:
+ * Every task is a {@link Job}, judged once at the end of the run against the
+ * requirement of its service: a {@code deadline} service needs its tasks done
+ * before their deadline and accepts losing some; a {@code lossless} one needs
+ * them done at all, within its delivery window, late or not. The figures are
+ * generic, so any two strategies compare on them:
  * <ul>
+ * <li><b>requirement met</b>: the share of the judged tasks that met the
+ * requirement of their service, overall, while a partition was in progress and
+ * while none was, per requirement and per service, and the number of services
+ * that reach their target ({@code services.<n>.target_pct});</li>
+ * <li><b>outcomes</b>: done on time, late, or lost;</li>
+ * <li><b>delay</b>: percentiles of the time from creation to done, over the tasks
+ * that were done;</li>
+ * <li><b>cost</b>: attempts per task, runs beyond the first that count, instances
+ * started, memory held, control traffic and data lost on the network;</li>
+ * <li><b>exposure</b>: for each kind of trouble a task can meet while it is not
+ * done (its device detached, handed over or changed group, a host of it failed,
+ * a partition started), how many tasks met it and how many of those still met
+ * their requirement: how well the strategy recovers.</li>
+ * </ul>
+ * Files of a run, named after the algorithm, the number of devices and the
+ * delivery mode:
+ * <ul>
+ * <li>{@code *_tasks.csv}: one row per task, with its outcome, attempts and
+ * exposures;</li>
  * <li>{@code *_timeline.csv}: one row every {@code metrics.sample_interval_s},
- * with the partitions in progress, the links down, the tasks that succeeded and
- * failed in the interval, the deployments so far, and the strategy's own
- * columns.</li>
- * <li>{@code *_failures.csv}: one row per failed task, with its device, the
- * server it is attached to, its partition group, why it failed, and whether it
- * was lost on its way to its host or with its result on the way back.</li>
- * <li>{@code *_device_types.csv}: one row per type of end device, with its
- * tasks, where they ran, and why they failed.</li>
- * <li>{@code *_partitions.csv}: one row per group of every partition, with what
- * the group held and what happened to its tasks and deployments while it was
- * cut.</li>
- * <li>{@code *_deployments.csv}: one row per deployment, with the strategy's own
- * columns.</li>
+ * with the state of the network and the tasks created in the interval, and the
+ * strategy's own columns;</li>
+ * <li>{@code *_device_types.csv}: one row per type of end device;</li>
+ * <li>{@code *_partitions.csv}: one row per group of every partition: what it held
+ * when the partition started, the nodes that joined or left it, and the tasks
+ * created in it while it lasted.</li>
  * </ul>
  *
  * @see TestbedSimulationManager#onSimulationEnd()
@@ -48,7 +63,7 @@ public class TestbedMetrics {
 	public static final class GroupRecord {
 		/** Index of the group in its partition. */
 		public final int index;
-		/** Names of its servers. */
+		/** Names of its servers when the partition started. */
 		public final List<String> nodes;
 		/** Access servers it holds. */
 		public final int accessNodes;
@@ -64,12 +79,12 @@ public class TestbedMetrics {
 		public final int accessNodesWithCloud;
 		/** Devices of each type attached to its servers, for example {@code IoT sensor:12}. */
 		public final String deviceMix;
-		int tasksOk;
-		int tasksFailed;
-		/** Failed tasks of its devices while it was cut, by failure reason. */
-		final Map<String, Integer> failureReasons = new TreeMap<>();
-		int deployments;
-		int deploymentFailures;
+		/** Moving servers that joined or left it while the partition lasted. */
+		int serversJoined;
+		int serversLeft;
+		/** Devices that attached to an access server of it from another group, or left it. */
+		int devicesJoined;
+		int devicesLeft;
 
 		GroupRecord(int index, List<String> nodes, int accessNodes, int devices, int gateways,
 				int accessNodesWithCloud, String deviceMix) {
@@ -83,121 +98,119 @@ public class TestbedMetrics {
 		}
 	}
 
-	/** What happened to the tasks of one type of device. */
-	static final class TypeRecord {
-		int ok;
-		int failed;
+	/** The judged tasks of a set, with how they ended. */
+	static final class Tally {
+		int judged;
+		int met;
+		int onTime;
+		int late;
+		int lost;
+		int censored;
+		final List<Double> delays = new ArrayList<>();
 		int edge;
 		int cloud;
-		double delay;
-		/** Delay of every task that succeeded, in seconds. */
-		final List<Double> delays = new ArrayList<>();
-		final Map<String, Integer> reasons = new TreeMap<>();
+		int device;
+		int attempts;
+		int duplicates;
+
+		void add(Job job, double end) {
+			attempts += job.attempts.size();
+			duplicates += job.duplicates;
+			Job.Outcome outcome = job.outcome(end);
+			if (outcome == Job.Outcome.CENSORED) {
+				censored++;
+				return;
+			}
+			judged++;
+			if (Boolean.TRUE.equals(job.met(end)))
+				met++;
+			if (outcome == Job.Outcome.ON_TIME)
+				onTime++;
+			else if (outcome == Job.Outcome.LATE)
+				late++;
+			else
+				lost++;
+			if (job.isDone()) {
+				delays.add(job.doneAt() - job.createdAt());
+				if (job.doneBy != null && job.doneBy.host().getType() == TYPES.CLOUD)
+					cloud++;
+				else if (job.doneBy != null && job.doneBy.host().getType() == TYPES.EDGE_DEVICE)
+					device++;
+				else
+					edge++;
+			}
+		}
+
+		double pct(int count) {
+			return judged == 0 ? Double.NaN : 100.0 * count / judged;
+		}
+	}
+
+	/** A partition that ended, with when. */
+	private static final class Ended {
+		final TestbedWorld.ActivePartition partition;
+		final double end;
+
+		Ended(TestbedWorld.ActivePartition partition, double end) {
+			this.partition = partition;
+			this.end = end;
+		}
 	}
 
 	private final TestbedWorld world;
 
-	int tasksOk;
-	int tasksFailed;
-	int healthyOk;
-	int healthyFailed;
-	private int windowOk;
-	private int windowFailed;
-	/** Failed tasks by failure reason, over the whole run. */
-	final Map<String, Integer> failures = new TreeMap<>();
-	/** Failed tasks by failure reason, while no partition was in progress. */
-	final Map<String, Integer> healthyFailures = new TreeMap<>();
-	/** Failed tasks lost on their way to their host, and on the way back with their result. */
-	int lostOnRequest;
-	int lostOnResult;
-	/** Results that reached the device that sent the task, on time or not. */
-	int resultsReceived;
 	/** Times a device attached to another access server. */
 	int handovers;
-	/** Delay of every task that succeeded, in seconds. */
-	private final List<Double> delays = new ArrayList<>();
-	/** Tasks by device type, in the order the types first finished a task. */
-	final Map<String, TypeRecord> byType = new LinkedHashMap<>();
-	/** Tasks whose result was lost on the way back, until they are recorded. */
-	private final Set<Task> losingResult = Collections.newSetFromMap(new IdentityHashMap<>());
+	/** Servers and devices that changed partition group. */
+	int groupTransfers;
+	/** Nodes refused by a group, each counted once per partition and group. */
+	private final Set<String> refusedJoins = new HashSet<>();
 
-	int deployments;
-	int deploymentFailures;
-	int cloudDeployments;
-	private final List<Double> deploymentLatencies = new ArrayList<>();
-
-	private final List<String> timeline = new ArrayList<>();
-	private final List<String> failureLog = new ArrayList<>();
-	private final List<String> deploymentLog = new ArrayList<>();
-	private final List<String> partitionLog = new ArrayList<>();
+	private final List<Double> sampleTimes = new ArrayList<>();
+	private final List<String> sampleRows = new ArrayList<>();
+	private final List<Ended> ended = new ArrayList<>();
 	private double lastSample = -1;
+	private long lastControlBytes;
 
 	TestbedMetrics(TestbedWorld world) {
 		this.world = world;
 	}
 
-	// ---------------------------------------------------------------- tasks
-
-	/**
-	 * Records a task that reached a terminal state.
-	 *
-	 * @param task   the task
-	 * @param failed whether it failed
-	 */
-	void taskFinished(Task task, boolean failed) {
-		String reason = String.valueOf(task.getFailureReason());
-		TestbedWorld.DeviceType type = world.deviceTypeOf(task.getEdgeDevice());
-		if (type != null) {
-			TypeRecord record = byType.computeIfAbsent(type.name, name -> new TypeRecord());
-			if (failed) {
-				record.failed++;
-				record.reasons.merge(reason, 1, Integer::sum);
-			} else {
-				record.ok++;
-				record.delay += task.getTotalDelay();
-				record.delays.add(task.getTotalDelay());
-				delays.add(task.getTotalDelay());
-				if (task.getOffloadingDestination().getType() == TYPES.CLOUD)
-					record.cloud++;
-				else if (task.getOffloadingDestination().getType() == TYPES.EDGE_DATACENTER)
-					record.edge++;
-			}
-		}
-		EdgeServer home = world.homeOf(task.getEdgeDevice());
-		if (failed) {
-			tasksFailed++;
-			windowFailed++;
-			failures.merge(reason, 1, Integer::sum);
-			logFailure(task, home, reason);
-		} else {
-			tasksOk++;
-			windowOk++;
-		}
-		if (world.activePartitions().isEmpty()) {
-			if (failed) {
-				healthyFailed++;
-				healthyFailures.merge(reason, 1, Integer::sum);
-			} else
-				healthyOk++;
-			return;
-		}
-		for (TestbedWorld.ActivePartition partition : world.activePartitions()) {
-			Integer group = partition.groupOf.get(home);
-			if (group == null)
-				continue;
-			GroupRecord record = partition.groups.get(group);
-			if (failed) {
-				record.tasksFailed++;
-				record.failureReasons.merge(reason, 1, Integer::sum);
-			} else
-				record.tasksOk++;
-		}
-	}
+	// ---------------------------------------------------------------- events
 
 	/** Counts a device that attached to another access server. */
 	void handover(ComputingNode device, EdgeServer from, EdgeServer to) {
 		handovers++;
 	}
+
+	/** Counts a moving server that joined another group of a partition. */
+	void serverChangedGroup(TestbedWorld.ActivePartition partition, int from, int to) {
+		groupTransfers++;
+		partition.groups.get(from).serversLeft++;
+		partition.groups.get(to).serversJoined++;
+	}
+
+	/** Counts a device that attached to an access server of another group of a partition. */
+	void deviceChangedGroup(TestbedWorld.ActivePartition partition, int from, int to) {
+		groupTransfers++;
+		partition.groups.get(from).devicesLeft++;
+		partition.groups.get(to).devicesJoined++;
+	}
+
+	/**
+	 * Counts a node the strategy did not admit into a group, once per partition
+	 * and group however often it asks.
+	 */
+	void joinRefused(TestbedWorld.ActivePartition partition, ComputingNode node, int group) {
+		refusedJoins.add(partition.spec.index + ":" + group + ":" + node.getId());
+	}
+
+	/** Records a partition once it has healed. */
+	void partitionEnded(TestbedWorld.ActivePartition partition, double end) {
+		ended.add(new Ended(partition, end));
+	}
+
+	// -------------------------------------------------------------- figures
 
 	/**
 	 * @param values   numbers, in any order
@@ -212,137 +225,100 @@ public class TestbedMetrics {
 		return sorted.get((int) Math.min(sorted.size() - 1, Math.floor(fraction * sorted.size())));
 	}
 
+	private double end() {
+		return world.now();
+	}
+
+	/** @return how every task of the run ended */
+	Tally all() {
+		Tally tally = new Tally();
+		for (Job job : world.engine.jobs())
+			tally.add(job, end());
+		return tally;
+	}
+
 	/**
 	 * @return the figures of this run that the sweep averages over its
-	 *         replications, by name
+	 *         replications, by name: the same names for every strategy
 	 */
 	Map<String, Double> summary() {
+		double end = end();
+		TaskEngine engine = world.engine;
+		Tally all = new Tally();
+		Tally partitioned = new Tally();
+		Tally healthy = new Tally();
+		Tally deadline = new Tally();
+		Tally lossless = new Tally();
+		Map<Service, Tally> byService = new LinkedHashMap<>();
+		Map<Job.Exposure, Tally> byExposure = new EnumMap<>(Job.Exposure.class);
+		// A run is redundant when what it ran, the task or one of its parts, had run
+		// already: the parts of a divided task are not copies of each other.
+		int ranOnce = 0;
+		for (Job job : engine.jobs()) {
+			all.add(job, end);
+			(job.partitioned ? partitioned : healthy).add(job, end);
+			(job.service().lossless ? lossless : deadline).add(job, end);
+			byService.computeIfAbsent(job.service(), key -> new Tally()).add(job, end);
+			for (Job.Exposure exposure : job.exposures)
+				byExposure.computeIfAbsent(exposure, key -> new Tally()).add(job, end);
+			Set<Integer> ran = new HashSet<>();
+			for (Attempt attempt : job.attempts)
+				if (!Double.isNaN(attempt.ranAt()))
+					ran.add(attempt.part());
+			ranOnce += ran.size();
+		}
 		Map<String, Double> values = new LinkedHashMap<>();
-		int partitionedOk = tasksOk - healthyOk;
-		int partitionedFailed = tasksFailed - healthyFailed;
-		values.put("tasks", (double) (tasksOk + tasksFailed));
-		values.put("success_pct", rate(tasksOk, tasksFailed));
-		values.put("success_whole_pct", rate(healthyOk, healthyFailed));
-		values.put("success_partitioned_pct", rate(partitionedOk, partitionedFailed));
-		double total = 0;
-		for (double delay : delays)
-			total += delay;
-		values.put("delay_mean_ms", delays.isEmpty() ? Double.NaN : 1000 * total / delays.size());
-		values.put("delay_p50_ms", 1000 * percentile(delays, 0.5));
-		values.put("delay_p95_ms", 1000 * percentile(delays, 0.95));
-		values.put("delay_p99_ms", 1000 * percentile(delays, 0.99));
-		values.put("deployments", (double) deployments);
-		values.put("deployment_failures", (double) deploymentFailures);
+		values.put("tasks", (double) all.judged);
+		values.put("tasks_censored", (double) all.censored);
+		values.put("requirement_met_pct", all.pct(all.met));
+		values.put("requirement_met_partitioned_pct", partitioned.pct(partitioned.met));
+		values.put("requirement_met_healthy_pct", healthy.pct(healthy.met));
+		values.put("deadline_met_pct", deadline.pct(deadline.met));
+		values.put("lossless_met_pct", lossless.pct(lossless.met));
+		values.put("on_time_pct", all.pct(all.onTime));
+		values.put("late_pct", all.pct(all.late));
+		values.put("lost_pct", all.pct(all.lost));
+		values.put("lost_partitioned_pct", partitioned.pct(partitioned.lost));
+		values.put("delay_p50_ms", 1000 * percentile(all.delays, 0.5));
+		values.put("delay_p95_ms", 1000 * percentile(all.delays, 0.95));
+		values.put("delay_p99_ms", 1000 * percentile(all.delays, 0.99));
+		int withTarget = 0;
+		int onTarget = 0;
+		for (Map.Entry<Service, Tally> service : byService.entrySet()) {
+			Tally tally = service.getValue();
+			double met = tally.pct(tally.met);
+			values.put("met_pct[" + service.getKey().name.replace(',', ' ') + "]", met);
+			if (!Double.isNaN(service.getKey().targetPct)) {
+				withTarget++;
+				if (met >= service.getKey().targetPct)
+					onTarget++;
+			}
+		}
+		if (withTarget > 0) {
+			values.put("services_with_target", (double) withTarget);
+			values.put("services_on_target", (double) onTarget);
+		}
+		for (Job.Exposure exposure : Job.Exposure.values()) {
+			Tally tally = byExposure.getOrDefault(exposure, new Tally());
+			String name = exposure.name().toLowerCase(Locale.ROOT);
+			values.put("exposed_" + name + "_tasks", (double) tally.judged);
+			values.put("exposed_" + name + "_met_pct", tally.pct(tally.met));
+		}
+		int jobs = engine.jobs().size();
+		values.put("attempts_per_task", jobs == 0 ? Double.NaN : (double) engine.attemptsDispatched / jobs);
+		values.put("redundant_runs_pct",
+				engine.attemptsRun == 0 ? 0 : 100.0 * (engine.attemptsRun - ranOnce) / engine.attemptsRun);
+		values.put("instances_started", (double) engine.instancesStarted);
+		engine.closeMemoryIntegral();
+		int servers = world.servers().size();
+		values.put("instance_memory_mb_per_server", end <= 0 ? Double.NaN : engine.busyMemoryIntegral / end / servers);
+		values.put("control_kbps_per_server", end <= 0 ? Double.NaN : engine.controlBytes * 8 / 1000.0 / end / servers);
+		values.put("control_messages_lost", (double) engine.controlLost);
+		values.put("data_transfers_lost", (double) engine.dataLost);
 		values.put("handovers", (double) handovers);
+		values.put("group_transfers", (double) groupTransfers);
+		values.put("joins_refused", (double) refusedJoins.size());
 		return values;
-	}
-
-	private static double rate(int ok, int failed) {
-		return ok + failed == 0 ? Double.NaN : 100.0 * ok / (ok + failed);
-	}
-
-	/** Marks a task whose result is lost on its way back to the device. */
-	void losingResult(Task task) {
-		losingResult.add(task);
-	}
-
-	/**
-	 * Records one failed task: when, whose, where it was in the network, why, and
-	 * whether it was lost on its way to its host or with its result on the way back.
-	 */
-	private void logFailure(Task task, EdgeServer home, String reason) {
-		String lostOn = "";
-		if (losingResult.remove(task)) {
-			lostOn = "result";
-			lostOnResult++;
-		} else if (task.getFailureReason() == Task.FailureReason.FAILED_DUE_TO_NETWORK_OUTAGE) {
-			lostOn = "request";
-			lostOnRequest++;
-		}
-		ComputingNode destination = task.getOffloadingDestination();
-		String host = destination == null || destination == ComputingNode.NULL ? ""
-				: destination.getType() == TYPES.CLOUD ? "cloud" : destination.getName();
-		failureLog.add(csv(String.format(Locale.ROOT, "%.3f", world.now()),
-				String.valueOf(task.getEdgeDevice().getId()), String.valueOf(world.deviceTypeOf(task.getEdgeDevice())),
-				home == null ? "" : home.name(), groupsOf(home), reason, lostOn, host));
-	}
-
-	/** @return the partition groups of a server, as {@code partition:group}, or {@code none} */
-	private String groupsOf(EdgeServer server) {
-		StringBuilder groups = new StringBuilder();
-		for (TestbedWorld.ActivePartition partition : world.activePartitions()) {
-			Integer group = partition.groupOf.get(server);
-			if (group != null)
-				groups.append(groups.length() == 0 ? "" : " ").append(partition.spec.index).append(':').append(group);
-		}
-		return groups.length() == 0 ? "none" : groups.toString();
-	}
-
-	/**
-	 * @param reasons failure counts by reason
-	 * @return them as {@code REASON:count} separated by spaces, or {@code none}
-	 */
-	static String reasons(Map<String, Integer> reasons) {
-		if (reasons.isEmpty())
-			return "none";
-		StringBuilder text = new StringBuilder();
-		for (Map.Entry<String, Integer> reason : reasons.entrySet())
-			text.append(text.length() == 0 ? "" : " ").append(reason.getKey()).append(':').append(reason.getValue());
-		return text.toString();
-	}
-
-	// ---------------------------------------------------------- deployments
-
-	/** Records the outcome of one deployment. */
-	void deployment(Deployment deployment) {
-		deployments++;
-		if (deployment.success()) {
-			deploymentLatencies.add(deployment.delay);
-			if (deployment.onCloud)
-				cloudDeployments++;
-		} else
-			deploymentFailures++;
-		for (TestbedWorld.ActivePartition partition : world.activePartitions()) {
-			Integer group = partition.groupOf.get(deployment.home);
-			if (group == null)
-				continue;
-			partition.groups.get(group).deployments++;
-			if (!deployment.success())
-				partition.groups.get(group).deploymentFailures++;
-		}
-		List<String> row = new ArrayList<>(List.of(String.format(Locale.ROOT, "%.3f", world.now()),
-				String.valueOf(deployment.device.getId()), String.valueOf(world.deviceTypeOf(deployment.device)),
-				deployment.home.name(), deployment.service.name.replace(',', ' '), deployment.outcome,
-				deployment.onCloud ? "cloud" : deployment.host == null ? "" : deployment.host.name(),
-				String.format(Locale.ROOT, "%.2f", deployment.delay * 1000)));
-		row.addAll(deployment.details());
-		deploymentLog.add(String.join(",", row));
-	}
-
-	/**
-	 * @param fraction a fraction between 0 and 1
-	 * @return that percentile of the latencies of the successful deployments, in
-	 *         seconds, or {@code NaN} when none succeeded
-	 */
-	double deploymentLatencyPercentile(double fraction) {
-		return percentile(deploymentLatencies, fraction);
-	}
-
-	// ----------------------------------------------------------- partitions
-
-	/** Records a partition once it has healed, group by group. */
-	void partitionEnded(TestbedWorld.ActivePartition partition, double end) {
-		for (GroupRecord group : partition.groups)
-			partitionLog.add(String.format(Locale.ROOT, "%d,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s",
-					partition.spec.index, partition.spec.start, end, group.index, group.nodes.size(),
-					group.accessNodes, group.devices, group.gateways, group.accessNodesWithCloud, group.tasksOk,
-					group.tasksFailed, group.deployments, group.deploymentFailures, reasons(group.failureReasons),
-					group.deviceMix, String.join(" ", group.nodes)));
-	}
-
-	/** @return the partition rows, without header */
-	List<String> partitionRows() {
-		return Collections.unmodifiableList(partitionLog);
 	}
 
 	// ------------------------------------------------------------- timeline
@@ -352,14 +328,18 @@ public class TestbedMetrics {
 		double now = world.now();
 		if (now <= lastSample)
 			return;
-		List<String> row = new ArrayList<>(List.of(String.format(Locale.ROOT, "%.1f", now),
-				String.valueOf(world.activePartitions().size()), String.valueOf(world.topology().linksDown()),
-				String.valueOf(windowOk), String.valueOf(windowFailed), String.valueOf(deployments),
-				String.valueOf(deploymentFailures), String.valueOf(handovers), String.valueOf(detached())));
+		TaskEngine engine = world.engine;
+		double interval = lastSample < 0 ? now : now - lastSample;
+		double kbps = interval <= 0 ? 0
+				: (engine.controlBytes - lastControlBytes) * 8 / 1000.0 / interval / world.servers().size();
+		lastControlBytes = engine.controlBytes;
+		List<String> row = new ArrayList<>(List.of(String.valueOf(world.activePartitions().size()),
+				String.valueOf(world.topology().linksDown()), String.valueOf(handovers), String.valueOf(detached()),
+				String.valueOf(engine.instanceCount()), String.format(Locale.ROOT, "%.0f", engine.memoryTotal()),
+				String.format(Locale.ROOT, "%.2f", kbps)));
 		row.addAll(world.strategy().timelineValues());
-		timeline.add(String.join(",", row));
-		windowOk = 0;
-		windowFailed = 0;
+		sampleTimes.add(now);
+		sampleRows.add(String.join(",", row));
 		lastSample = now;
 	}
 
@@ -375,7 +355,7 @@ public class TestbedMetrics {
 	// ---------------------------------------------------------------- files
 
 	/**
-	 * Writes the five files of the run, and lets the strategy write its own.
+	 * Writes the files of the run, and lets the strategy write its own.
 	 *
 	 * @param folder the output folder
 	 * @param label  the beginning of the names of the files of this run
@@ -383,44 +363,122 @@ public class TestbedMetrics {
 	 */
 	void write(Path folder, String label) throws IOException {
 		Files.createDirectories(folder);
-		PlacementStrategy strategy = world.strategy();
-		write(folder.resolve(label + "_timeline.csv"), header(List.of("time_s", "active_partitions", "links_down",
-				"tasks_ok", "tasks_failed", "deployments", "deployment_failures", "handovers", "detached_devices"),
-				strategy.timelineColumns()),
+		double end = end();
+		List<Job> jobs = world.engine.jobs();
+		OrchestrationStrategy strategy = world.strategy();
+
+		// Tasks
+		List<String> taskRows = new ArrayList<>();
+		for (Job job : jobs) {
+			Boolean met = job.met(end);
+			StringBuilder exposures = new StringBuilder();
+			for (Job.Exposure exposure : job.exposures)
+				exposures.append(exposures.length() == 0 ? "" : " ").append(exposure.name().toLowerCase(Locale.ROOT));
+			taskRows.add(String.join(",", String.valueOf(job.id()), job.device().getName(),
+					String.valueOf(world.deviceTypeOf(job.device())), job.service().name.replace(',', ' '),
+					job.stage() == null ? "" : job.stage(), job.service().requirement(),
+					String.format(Locale.ROOT, "%.3f", job.createdAt()),
+					job.isDone() ? String.format(Locale.ROOT, "%.3f", job.doneAt()) : "",
+					job.isDone() ? String.format(Locale.ROOT, "%.1f", 1000 * (job.doneAt() - job.createdAt())) : "",
+					job.outcome(end).name().toLowerCase(Locale.ROOT), met == null ? "" : String.valueOf(met),
+					String.valueOf(job.attempts.size()), String.valueOf(job.duplicates),
+					job.doneBy == null ? "" : job.doneBy.host().getName(), String.valueOf(job.partitioned),
+					exposures.toString()));
+		}
+		write(folder.resolve(label + "_tasks.csv"),
+				"task,device,device_type,service,stage,requirement,created_s,done_s,delay_ms,outcome,met,attempts,"
+						+ "duplicates,host,partitioned,exposures",
+				taskRows);
+
+		// Timeline: the state sampled during the run, and the tasks created in each interval
+		List<String> timeline = new ArrayList<>();
+		int next = 0;
+		List<Job> sorted = new ArrayList<>(jobs);
+		sorted.sort((a, b) -> Double.compare(a.createdAt(), b.createdAt()));
+		for (int i = 0; i < sampleTimes.size(); i++) {
+			Tally tally = new Tally();
+			while (next < sorted.size() && sorted.get(next).createdAt() <= sampleTimes.get(i))
+				tally.add(sorted.get(next++), end);
+			timeline.add(String.format(Locale.ROOT, "%.1f,%d,%d,%s,%s,%s", sampleTimes.get(i), tally.judged,
+					tally.censored, cell(tally.pct(tally.met)), cell(tally.pct(tally.lost)), sampleRows.get(i)));
+		}
+		write(folder.resolve(label + "_timeline.csv"),
+				header(List.of("time_s", "tasks_created", "tasks_censored", "requirement_met_pct", "lost_pct",
+						"active_partitions", "links_down", "handovers", "detached_devices", "instances",
+						"instance_memory_mb", "control_kbps_per_server"), strategy.timelineColumns()),
 				timeline);
-		write(folder.resolve(label + "_failures.csv"),
-				"time_s,device,device_type,home,partition_group,reason,lost_on,destination", failureLog);
+
+		// Device types
 		List<String> types = new ArrayList<>();
 		for (TestbedWorld.DeviceType type : world.deviceTypes()) {
-			TypeRecord record = byType.getOrDefault(type.name, new TypeRecord());
+			Tally tally = new Tally();
+			for (Job job : jobs)
+				if (world.deviceTypeOf(job.device()) == type)
+					tally.add(job, end);
 			long devices = world.homes().keySet().stream().filter(device -> world.deviceTypeOf(device) == type)
 					.count();
-			types.add(String.format(Locale.ROOT, "%s,%d,%s,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f,%s", type.name, devices,
-					world.services().get(type.application).name, record.ok, record.failed, record.edge, record.cloud,
-					record.ok == 0 ? 0 : record.delay / record.ok, percentile(record.delays, 0.5),
-					percentile(record.delays, 0.95), percentile(record.delays, 0.99), reasons(record.reasons)));
+			Service service = world.services().get(type.application);
+			types.add(String.format(Locale.ROOT, "%s,%d,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%d,%d,%d", type.name,
+					devices, service.name.replace(',', ' '), service.requirement(), tally.judged, tally.censored,
+					cell(tally.pct(tally.met)), cell(tally.pct(tally.onTime)), cell(tally.pct(tally.late)),
+					cell(tally.pct(tally.lost)), cell(1000 * mean(tally.delays)),
+					cell(1000 * percentile(tally.delays, 0.5)), cell(1000 * percentile(tally.delays, 0.95)),
+					cell(1000 * percentile(tally.delays, 0.99)), tally.edge, tally.cloud, tally.device,
+					tally.attempts, tally.duplicates));
 		}
 		write(folder.resolve(label + "_device_types.csv"),
-				"device_type,devices,application,tasks_ok,tasks_failed,served_by_edge,served_by_cloud,mean_delay_s,"
-						+ "p50_delay_s,p95_delay_s,p99_delay_s,failure_reasons",
+				"device_type,devices,service,requirement,tasks,tasks_censored,requirement_met_pct,on_time_pct,late_pct,"
+						+ "lost_pct,mean_delay_ms,p50_delay_ms,p95_delay_ms,p99_delay_ms,done_on_edge,done_on_cloud,"
+						+ "done_on_device,attempts,duplicates",
 				types);
+
 		write(folder.resolve(label + "_partitions.csv"),
-				"partition,start_s,end_s,group,nodes,access_nodes,devices,gateways,access_nodes_with_cloud,tasks_ok,"
-						+ "tasks_failed,deployments,deployment_failures,failure_reasons,device_mix,members",
-				partitionLog);
-		write(folder.resolve(label + "_deployments.csv"), header(List.of("time_s", "device", "device_type", "home",
-				"service", "outcome", "host", "latency_ms"), strategy.deploymentColumns()), deploymentLog);
+				"partition,start_s,end_s,group,nodes,access_nodes,devices,gateways,access_nodes_with_cloud,tasks,"
+						+ "requirement_met_pct,lost_pct,servers_joined,servers_left,devices_joined,devices_left,"
+						+ "device_mix,members",
+				partitionRows());
 		strategy.write(folder, label);
+	}
+
+	/** @return one row per group of every partition, with the tasks created in it while it lasted */
+	List<String> partitionRows() {
+		double end = end();
+		List<Ended> all = new ArrayList<>(ended);
+		for (TestbedWorld.ActivePartition partition : world.activePartitions())
+			all.add(new Ended(partition, end));
+		List<String> rows = new ArrayList<>();
+		for (Ended entry : all) {
+			TestbedWorld.ActivePartition partition = entry.partition;
+			Map<Integer, Tally> byGroup = new LinkedHashMap<>();
+			for (Job job : world.engine.jobs()) {
+				Integer group = job.groups.get(partition);
+				if (group != null)
+					byGroup.computeIfAbsent(group, key -> new Tally()).add(job, end);
+			}
+			for (GroupRecord group : partition.groups) {
+				Tally tally = byGroup.getOrDefault(group.index, new Tally());
+				rows.add(String.format(Locale.ROOT, "%d,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%s,%s,%d,%d,%d,%d,%s,%s",
+						partition.spec.index, partition.spec.start, entry.end, group.index, group.nodes.size(),
+						group.accessNodes, group.devices, group.gateways, group.accessNodesWithCloud, tally.judged,
+						cell(tally.pct(tally.met)), cell(tally.pct(tally.lost)), group.serversJoined, group.serversLeft,
+						group.devicesJoined, group.devicesLeft, group.deviceMix, String.join(" ", group.nodes)));
+			}
+		}
+		return rows;
+	}
+
+	private static double mean(List<Double> values) {
+		return values.isEmpty() ? Double.NaN : values.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+	}
+
+	private static String cell(double value) {
+		return Double.isNaN(value) ? "" : String.format(Locale.ROOT, "%.2f", value);
 	}
 
 	private static String header(List<String> columns, List<String> strategyColumns) {
 		List<String> all = new ArrayList<>(columns);
 		all.addAll(strategyColumns);
 		return String.join(",", all);
-	}
-
-	private static String csv(String... cells) {
-		return String.join(",", cells);
 	}
 
 	/**

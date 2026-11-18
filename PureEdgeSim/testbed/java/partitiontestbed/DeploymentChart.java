@@ -31,7 +31,7 @@ import com.mechalikh.pureedgesim.simulationvisualizer.Chart;
  * nodes, with the links a failure or a partition has cut in red, the uplinks of
  * the gateways, and, for each component, a line from every access node to each
  * node that runs the component for its devices. The cloud sits above the map, so
- * a line that leaves the map upwards is a component deployed on the cloud. The
+ * a line that leaves the map upwards is a task sent to the cloud. The
  * nodes are marked by role, the nodes that run at least one instance in green,
  * and while a partition lasts every node is circled in the colour of its group.
  *
@@ -123,12 +123,11 @@ public class DeploymentChart extends Chart {
 			Service service = services.get(c);
 			// One line per access node and host, however many devices share it.
 			Set<List<ComputingNode>> pairs = new LinkedHashSet<>();
-			for (ComputingNode device : world.homes().keySet()) {
-				TestbedWorld.Placement placement = world.placementOf(device);
-				if (placement == null || !device.isApplicationPlaced()
-						|| placement.service != service)
+			for (Attempt attempt : world.engine.lastAttempts().values()) {
+				if (attempt.job().service() != service || attempt.state() == Attempt.State.LOST
+						|| attempt.state() == Attempt.State.CANCELLED)
 					continue;
-				pairs.add(List.of(placement.home.node, placement.node(world)));
+				pairs.add(List.of(attempt.from(), attempt.host()));
 			}
 			Lines lines = new Lines();
 			for (List<ComputingNode> pair : pairs)
@@ -182,9 +181,11 @@ public class DeploymentChart extends Chart {
 		List<Double> hostX = new ArrayList<>();
 		List<Double> hostY = new ArrayList<>();
 		Set<EdgeServer> hosts = new HashSet<>();
-		for (TestbedWorld.Placement placement : world.placements())
-			if (placement.host != null && placement.device.isApplicationPlaced())
-				hosts.add(placement.host);
+		for (Attempt attempt : world.engine.lastAttempts().values()) {
+			EdgeServer host = world.serverOf(attempt.host());
+			if (host != null && attempt.state() != Attempt.State.LOST && attempt.state() != Attempt.State.CANCELLED)
+				hosts.add(host);
+		}
 		for (EdgeServer server : world.servers()) {
 			Location at = location(server.node);
 			(server.access ? accessX : nodeX).add(at.getXPos());

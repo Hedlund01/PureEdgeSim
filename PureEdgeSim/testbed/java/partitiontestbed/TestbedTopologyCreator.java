@@ -18,6 +18,8 @@ import com.mechalikh.pureedgesim.network.NetworkLinkMan;
 import com.mechalikh.pureedgesim.network.NetworkLinkWanDown;
 import com.mechalikh.pureedgesim.network.NetworkLinkWanUp;
 import com.mechalikh.pureedgesim.network.NetworkLinkWifiDeviceToDevice;
+
+import partitiontestbed.NetworkPolicy.Layer;
 import com.mechalikh.pureedgesim.simulationmanager.SimulationManager;
 
 /**
@@ -43,7 +45,13 @@ import com.mechalikh.pureedgesim.simulationmanager.SimulationManager;
  * server that moves. A link to a moving server exists while the two servers are
  * within {@code mesh.link_range_m} and no partition puts them in two groups, and
  * its latency follows their distance; the links between two servers that do not
- * move stay as the mesh was built.
+ * move stay as the mesh was built. When the strategy's {@link NetworkPolicy} uses
+ * links between devices, two devices within {@code d2d.range_m} of each other
+ * are linked for as long as they are, their latency following their distance.
+ * <p>
+ * Whether a link exists is the testbed's, the same for every strategy; which
+ * links carry the strategy's traffic, and through which nodes, is its policy
+ * (see {@link LiveTopology}).
  *
  * @see TestbedNodesGenerator
  */
@@ -53,6 +61,8 @@ public class TestbedTopologyCreator extends DefaultTopologyCreator {
 	private final Set<Long> linked = new HashSet<>();
 	/** The two links of each pair of the mesh, one per direction. */
 	private final Map<Long, NetworkLink[]> meshLinks = new HashMap<>();
+	/** The two radio links of each pair of devices that came in range, one per direction. */
+	private final Map<Long, NetworkLink[]> deviceLinks = new HashMap<>();
 
 	/**
 	 * @param simulationManager       the testbed simulation manager
@@ -98,7 +108,12 @@ public class TestbedTopologyCreator extends DefaultTopologyCreator {
 			device.setOrchestrator(home);
 		}
 
-		world.topology = new LiveTopology(infrastructureTopology, cloud);
+		NetworkPolicy policy = world.strategy().network();
+		world.topology = new LiveTopology(infrastructureTopology, policy, world::layerOf);
+		world.topology.setBarrier(world::blocks);
+		updateDeviceLinks();
+		getSimulationManager().getSimulationLogger().print("%s - Network policy of the strategy: %s",
+				getClass().getSimpleName(), policy);
 		getSimulationManager().getSimulationLogger().print(
 				"%s - Mesh of %d nodes with %d links (average degree %.1f), %d gateways, %d access nodes",
 				getClass().getSimpleName(), nodes.size(), world.meshPairs.size(),
@@ -201,7 +216,10 @@ public class TestbedTopologyCreator extends DefaultTopologyCreator {
 				EdgeServer b = servers.get(j);
 				if (!a.mobile && !b.mobile)
 					continue;
-				boolean inRange = distance(a.node, b.node) <= world.config.linkRange && !world.separated(a, b);
+				// Between two groups, the link exists only where the scenario lets radio
+				// cross them, and carries only what the barrier of the topology lets through.
+				boolean inRange = distance(a.node, b.node) <= world.config.linkRange
+						&& (!world.separated(a, b) || world.config.crossGroupRadio);
 				if (inRange)
 					link(a.node, b.node);
 				NetworkLink[] links = meshLinks.get(key(a.node, b.node));
@@ -214,6 +232,49 @@ public class TestbedTopologyCreator extends DefaultTopologyCreator {
 						topology.setLatency(link, latency);
 				}
 			}
+	}
+
+	/**
+	 * Makes the radio links between devices follow them: a pair within
+	 * {@code d2d.range_m} has a link in each direction, in use while they stay in
+	 * range. Only when the strategy uses links between devices.
+	 */
+	void updateDeviceLinks() {
+		LiveTopology topology = world.topology;
+		if (world.config.d2dRange <= 0 || !topology.policy().uses(Layer.DEVICE, Layer.DEVICE))
+			return;
+		List<ComputingNode> devices = new ArrayList<>(world.homes().keySet());
+		for (int i = 0; i < devices.size(); i++)
+			for (int j = i + 1; j < devices.size(); j++) {
+				ComputingNode a = devices.get(i);
+				ComputingNode b = devices.get(j);
+				double distance = distance(a, b);
+				boolean inRange = distance <= world.config.d2dRange;
+				NetworkLink[] links = deviceLinks.get(key(a, b));
+				if (links == null) {
+					if (!inRange)
+						continue;
+					links = new NetworkLink[] {
+							new NetworkLinkWifiDeviceToDevice(a, b, simulationManager, NetworkLinkTypes.LAN),
+							new NetworkLinkWifiDeviceToDevice(b, a, simulationManager, NetworkLinkTypes.LAN) };
+					for (NetworkLink link : links) {
+						link.setLatency(deviceLatency(distance));
+						infrastructureTopology.addLink(link);
+					}
+					deviceLinks.put(key(a, b), links);
+					topology.linkAdded();
+				}
+				double latency = deviceLatency(distance);
+				for (NetworkLink link : links) {
+					topology.enable(link, inRange, world.now());
+					if (inRange && Math.abs(link.getLatency() - latency) > 1e-9)
+						topology.setLatency(link, latency);
+				}
+			}
+	}
+
+	private double deviceLatency(double distance) {
+		return world.config.d2dBaseLatency + world.config.d2dLatencyPerKm * distance / 1000;
 	}
 
 	private int degree(ComputingNode node, List<ComputingNode> nodes) {

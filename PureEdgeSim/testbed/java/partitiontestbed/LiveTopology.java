@@ -7,6 +7,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 import org.jgrapht.Graph;
 import org.jgrapht.GraphPath;
@@ -17,6 +19,8 @@ import org.jgrapht.graph.MaskSubgraph;
 import com.mechalikh.pureedgesim.datacentersmanager.ComputingNode;
 import com.mechalikh.pureedgesim.network.InfrastructureGraph;
 import com.mechalikh.pureedgesim.network.NetworkLink;
+
+import partitiontestbed.NetworkPolicy.Layer;
 
 /**
  * The infrastructure graph as it is right now, with the links that are down
@@ -44,12 +48,17 @@ import com.mechalikh.pureedgesim.network.NetworkLink;
  * The time each link last left the routes is kept, which is how a transfer that
  * was crossing it is found and failed.
  * <p>
- * The cloud data center is an end of a path, never a hop in the middle of one.
- * Two edge servers whose groups both reached the cloud would otherwise still talk
- * to each other through it during a partition; here they are cut from each other
- * as a partition means, and each of them only reaches the cloud itself. A device
- * is never a hop either, since only one of its radio links is enabled.
- *
+ * What is routed over the links that carry is the strategy's
+ * {@link NetworkPolicy}: a path uses only links between layers the policy uses,
+ * and goes through a node, rather than starting or ending at it, only when that
+ * node relays. With {@link NetworkPolicy#hierarchical()}, the default, the cloud
+ * and the devices never relay: two edge servers whose groups both reached the
+ * cloud do not talk through it during a partition, as a partition means, and a
+ * device is an end of a path only. A {@linkplain #setBarrier barrier} also keeps
+ * out of the routes the links that join two groups of a partition without being
+ * cut by it, such as a radio contact the scenario or the policy does not let
+ * bridge them.
+ * <p>
  * @see TestbedNetworkModel
  * @see FailureInjector
  */
@@ -57,12 +66,14 @@ public class LiveTopology {
 
 	/** The full graph built by the topology creator. */
 	private final Graph<ComputingNode, NetworkLink> graph;
-	/** The cloud data center, which no path crosses. */
-	private final ComputingNode cloud;
-	/** The same graph without the links that are down, for paths to or from the cloud. */
-	private final Graph<ComputingNode, NetworkLink> live;
-	/** The same graph without the cloud either, for every other path. */
-	private final Graph<ComputingNode, NetworkLink> liveWithoutCloud;
+	/** What the strategy routes over. */
+	private final NetworkPolicy policy;
+	/** The layer of each node. */
+	private final Function<ComputingNode, Layer> layerOf;
+	/** Relaying set on a node by the strategy, over the default of its layer. */
+	private final Map<ComputingNode, Boolean> relayOverride = new HashMap<>();
+	/** Links that join two groups of a partition and must not carry the strategy's traffic. */
+	private Predicate<NetworkLink> barrier = link -> false;
 	/** Number of reasons each cut link is down for. */
 	private final Map<NetworkLink, Integer> cuts = new HashMap<>();
 	/** Number of reasons each failed node is down for. */
@@ -73,22 +84,81 @@ public class LiveTopology {
 	private final Map<NetworkLink, Double> lastCut = new HashMap<>();
 	/** Last time each node failed. */
 	private final Map<ComputingNode, Double> lastFailure = new HashMap<>();
-	/** Shortest paths from each source, until the next change, with the cloud. */
+	/** Shortest paths from each source, until the next change. */
 	private final Map<ComputingNode, SingleSourcePaths<ComputingNode, NetworkLink>> cache = new HashMap<>();
-	/** The same, without the cloud. */
-	private final Map<ComputingNode, SingleSourcePaths<ComputingNode, NetworkLink>> cacheWithoutCloud = new HashMap<>();
 	/** Called whenever a link leaves the routes. */
 	private final List<Runnable> lossListeners = new ArrayList<>();
 
 	/**
+	 * A topology in which every node but the cloud is an edge server, routed with
+	 * {@link NetworkPolicy#hierarchical()}.
+	 *
 	 * @param topology the complete topology of the run
 	 * @param cloud    the cloud data center
 	 */
 	public LiveTopology(InfrastructureGraph topology, ComputingNode cloud) {
+		this(topology, NetworkPolicy.hierarchical(), node -> node == cloud ? Layer.CLOUD : Layer.EDGE);
+	}
+
+	/**
+	 * @param topology the complete topology of the run
+	 * @param policy   what the strategy routes over
+	 * @param layerOf  the layer of each node
+	 */
+	public LiveTopology(InfrastructureGraph topology, NetworkPolicy policy, Function<ComputingNode, Layer> layerOf) {
 		this.graph = topology.getGraph();
-		this.cloud = cloud;
-		this.live = new MaskSubgraph<>(graph, vertex -> false, link -> !carries(link));
-		this.liveWithoutCloud = new MaskSubgraph<>(graph, vertex -> vertex == cloud, link -> !carries(link));
+		this.policy = policy;
+		this.layerOf = layerOf;
+	}
+
+	/**
+	 * @param barrier says which links join two groups of a partition in progress
+	 *                and must carry nothing of the strategy's, though they are up.
+	 *                It is asked again after every change of the topology or of the
+	 *                groups ({@link #groupsChanged()}).
+	 */
+	public void setBarrier(Predicate<NetworkLink> barrier) {
+		this.barrier = barrier;
+		changed(true);
+	}
+
+	/** Forgets the routes after a partition started, ended or a node changed group. */
+	public void groupsChanged() {
+		changed(true);
+	}
+
+	/**
+	 * Makes a node relay, or stop relaying, whatever its layer does.
+	 *
+	 * @param node     the node
+	 * @param relaying whether paths may go through it
+	 */
+	public void setRelay(ComputingNode node, boolean relaying) {
+		Boolean before = relayOverride.put(node, relaying);
+		if (before == null || before != relaying)
+			changed(false);
+	}
+
+	/**
+	 * @param node a node
+	 * @return whether paths may go through it
+	 */
+	public boolean relays(ComputingNode node) {
+		Boolean override = relayOverride.get(node);
+		return override != null ? override : policy.relays(layerOf.apply(node));
+	}
+
+	/** @return the policy the routes follow */
+	public NetworkPolicy policy() {
+		return policy;
+	}
+
+	/**
+	 * @param node a node
+	 * @return its layer
+	 */
+	public Layer layerOf(ComputingNode node) {
+		return layerOf.apply(node);
 	}
 
 	/**
@@ -181,7 +251,6 @@ public class LiveTopology {
 
 	private void changed(boolean loss) {
 		cache.clear();
-		cacheWithoutCloud.clear();
 		if (loss)
 			for (Runnable listener : lossListeners)
 				listener.run();
@@ -203,6 +272,17 @@ public class LiveTopology {
 	 */
 	public boolean carries(NetworkLink link) {
 		return !disabled.contains(link) && isUp(link);
+	}
+
+	/**
+	 * @param link a link of the topology
+	 * @return whether the strategy's traffic may cross it now: it carries, the
+	 *         policy uses links between the layers of its ends, and it does not
+	 *         join two groups that a partition keeps apart
+	 */
+	public boolean routable(NetworkLink link) {
+		return carries(link) && policy.uses(layerOf.apply(graph.getEdgeSource(link)),
+				layerOf.apply(graph.getEdgeTarget(link))) && !barrier.test(link);
 	}
 
 	/**
@@ -263,11 +343,12 @@ public class LiveTopology {
 	/**
 	 * @param links the links a transfer still has to cross
 	 * @param since the time at which it was sent
-	 * @return whether one of them carries nothing, or stopped at any time since
+	 * @return whether one of them is out of the routes, or stopped at any time
+	 *         since
 	 */
 	public boolean brokenSince(List<NetworkLink> links, double since) {
 		for (NetworkLink link : links) {
-			if (!carries(link))
+			if (!routable(link))
 				return true;
 			Double cut = lastCut.get(link);
 			if (cut != null && cut >= since)
@@ -281,6 +362,20 @@ public class LiveTopology {
 	}
 
 	/**
+	 * @param node a node
+	 * @return the nodes it has a routable link to
+	 */
+	public List<ComputingNode> neighbours(ComputingNode node) {
+		List<ComputingNode> neighbours = new ArrayList<>();
+		if (!graph.containsVertex(node))
+			return neighbours;
+		for (NetworkLink link : graph.outgoingEdgesOf(node))
+			if (routable(link) && !neighbours.contains(graph.getEdgeTarget(link)))
+				neighbours.add(graph.getEdgeTarget(link));
+		return neighbours;
+	}
+
+	/**
 	 * @param a one node
 	 * @param b another node
 	 * @return the links between them, in both directions
@@ -291,10 +386,19 @@ public class LiveTopology {
 		return links;
 	}
 
+	/**
+	 * The shortest paths from a source over the links it may route on, leaving a
+	 * node that does not relay only when it is the source: a path can end at such
+	 * a node but not go through it.
+	 */
 	private SingleSourcePaths<ComputingNode, NetworkLink> paths(ComputingNode from, ComputingNode to) {
-		if (from == cloud || to == cloud)
-			return cache.computeIfAbsent(from, source -> new DijkstraShortestPath<>(live).getPaths(source));
-		return cacheWithoutCloud.computeIfAbsent(from,
-				source -> new DijkstraShortestPath<>(liveWithoutCloud).getPaths(source));
+		return cache.computeIfAbsent(from, source -> {
+			Map<ComputingNode, Boolean> relaying = new HashMap<>();
+			Graph<ComputingNode, NetworkLink> view = new MaskSubgraph<>(graph, vertex -> false, link -> {
+				ComputingNode hop = graph.getEdgeSource(link);
+				return !routable(link) || hop != source && !relaying.computeIfAbsent(hop, this::relays);
+			});
+			return new DijkstraShortestPath<>(view).getPaths(source);
+		});
 	}
 }
