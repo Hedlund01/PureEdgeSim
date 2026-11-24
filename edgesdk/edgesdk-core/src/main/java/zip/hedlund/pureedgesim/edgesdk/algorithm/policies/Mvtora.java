@@ -41,10 +41,12 @@ import zip.hedlund.pureedgesim.edgesdk.model.Tier;
  * <b>Information.</b> As in the paper, the E-UAV collects the state of the
  * vehicles and hands it to the C-UAVs. Every {@link Params#slot() slot}, each
  * vehicle sends its position and load to the MEC servers, and each MEC server
- * sends its devices the vehicle states and the MEC tasks it is serving. A device
- * that decides to offload tells its server, which counts the task in the next
- * slot. State older than {@link Params#staleSlots()} slots is ignored, so a
- * device that stops hearing from its server computes locally.
+ * sends its devices the vehicle states, the MEC tasks it is serving, how many
+ * tasks it holds and its recent MEC arrival rate. A device that decides to
+ * offload tells its server, which counts the task in the next slot; until then,
+ * devices count the arrivals they expect at that rate. State older than
+ * {@link Params#staleSlots()} slots is ignored, so a device that stops hearing
+ * from its server computes locally.
  * <p>
  * <b>Decision</b> (Algorithm 5, then one step of Algorithm 1). For each new
  * task the device computes the utility of local computing; the utility of
@@ -161,8 +163,12 @@ public class Mvtora extends OrchestrationPolicy {
 	record Use(long task, NodeRef node, double work, double headroom, double since, double until) {
 	}
 
-	/** What a server tells its devices every slot. */
-	record SlotInfo(double at, List<VehicleState> vehicles, List<Use> uses) {
+	/**
+	 * What a server tells its devices every slot: the vehicles, the tasks it
+	 * counts, how many tasks it actually holds (running or queued), and how many
+	 * MEC tasks per second it was sent during the last slot.
+	 */
+	record SlotInfo(double at, List<VehicleState> vehicles, List<Use> uses, int held, double mecRate) {
 	}
 
 	/** A device's decision, sent to its server. */
@@ -184,6 +190,7 @@ public class Mvtora extends OrchestrationPolicy {
 	private final Map<NodeRef, List<NodeRef>> devicesOf = new TreeMap<>();
 	private NodeLocal<Map<NodeRef, VehicleState>> vehicleStates;
 	private NodeLocal<Set<Use>> serving;
+	private NodeLocal<int[]> arrivals;
 	private NodeLocal<DeviceState> deviceStates;
 
 	/** The device's latest slot information and the decisions it made since. */
@@ -228,6 +235,7 @@ public class Mvtora extends OrchestrationPolicy {
 		vehicles = vehicleSelect.except(mecSelect).resolve(t);
 		vehicleStates = ctx.nodeLocal(n -> new HashMap<>());
 		serving = ctx.nodeLocal(n -> new LinkedHashSet<>());
+		arrivals = ctx.nodeLocal(n -> new int[1]);
 		deviceStates = ctx.nodeLocal(n -> new DeviceState());
 		for (NodeRef device : t.nodes(Tier.END_DEVICE)) {
 			if (vehicles.contains(device))
@@ -297,7 +305,9 @@ public class Mvtora extends OrchestrationPolicy {
 		for (VehicleState v : vehicleStates.at(server).values())
 			if (now - v.at() <= stale)
 				fresh.add(v);
-		SlotInfo info = new SlotInfo(now, List.copyOf(fresh), List.copyOf(uses));
+		int[] sent = arrivals.at(server);
+		SlotInfo info = new SlotInfo(now, List.copyOf(fresh), List.copyOf(uses), held, sent[0] / params.slot());
+		sent[0] = 0;
 		long bytes = HEADER_BYTES + ENTRY_BYTES * (fresh.size() + uses.size());
 		for (NodeRef device : devicesOf.getOrDefault(server, List.of()))
 			ctx.send(server, device, bytes, info);
@@ -307,8 +317,12 @@ public class Mvtora extends OrchestrationPolicy {
 	public void onMessage(NodeRef at, NodeRef from, Object payload) {
 		if (payload instanceof VehicleState v)
 			vehicleStates.at(at).put(v.vehicle(), v);
-		else if (payload instanceof Offload o)
+		else if (payload instanceof Offload o) {
 			serving.at(at).addAll(o.uses());
+			for (Use u : o.uses())
+				if (u.node().equals(at))
+					arrivals.at(at)[0]++;
+		}
 		else if (payload instanceof SlotInfo info) {
 			DeviceState d = deviceStates.at(at);
 			if (d.latest == null || info.at() > d.latest.at()) {
@@ -325,18 +339,21 @@ public class Mvtora extends OrchestrationPolicy {
 		DeviceState d = deviceStates.at(device);
 		SlotInfo info = d.latest != null && now - d.latest.at() <= params.slot() * params.staleSlots() ? d.latest
 				: null;
+		NodeRef server = serverOf.get(device);
 		List<Use> uses = new ArrayList<>();
+		int unseen = 0;
 		if (info != null) {
 			uses.addAll(info.uses());
 			for (Use u : d.sent)
 				if (!info.uses().contains(u))
 					uses.add(u);
 			uses.removeIf(u -> u.until() <= now);
+			unseen = unseenMecTasks(info, d, server, now);
 		}
 
 		Option local = modes.contains(Mode.LOCAL) ? local(device, task, tMax) : null;
 		Option vfc = modes.contains(Mode.VFC) && info != null ? vfc(device, task, tMax, info, uses) : null;
-		Option mec = modes.contains(Mode.MEC) && info != null ? mec(device, task, tMax, uses) : null;
+		Option mec = modes.contains(Mode.MEC) && info != null ? mec(device, task, tMax, uses, unseen) : null;
 
 		// Algorithm 5: the better of local and VFC; Algorithm 1: switch to MEC if it improves
 		Option chosen = null;
@@ -354,12 +371,31 @@ public class Mvtora extends OrchestrationPolicy {
 			ctx.metrics().record("mvtora.utility", chosen.utility);
 		ctx.metrics().add("mvtora." + chosen.kind, 1);
 
-		if (!chosen.uses.isEmpty()) {
-			NodeRef server = serverOf.get(device);
+		if (!chosen.uses.isEmpty() && server != null) {
 			d.sent.addAll(chosen.uses);
 			ctx.send(device, server, HEADER_BYTES + ENTRY_BYTES * chosen.uses.size(), new Offload(chosen.uses));
 		}
 		return chosen.placement;
+	}
+
+	/**
+	 * Tasks on the server that the slot information does not list: those it holds
+	 * beyond the listed ones, and those the other devices are expected to have sent
+	 * since, at the last slot's rate. Every device decides on the same snapshot, so
+	 * without them they would all offload while the server looks idle, then all
+	 * stay away while it looks full.
+	 */
+	private static int unseenMecTasks(SlotInfo info, DeviceState d, NodeRef server, double now) {
+		int listed = 0;
+		for (Use u : info.uses())
+			if (u.node().equals(server))
+				listed++;
+		int mineSince = 0;
+		for (Use u : d.sent)
+			if (u.node().equals(server) && u.since() > info.at())
+				mineSince++;
+		long expected = Math.round(info.mecRate() * (now - info.at())) - mineSince;
+		return Math.max(0, info.held() - listed) + (int) Math.max(0, expected);
 	}
 
 	/** One offloading strategy and its predicted outcome. */
@@ -446,7 +482,7 @@ public class Mvtora extends OrchestrationPolicy {
 				used);
 	}
 
-	private Option mec(NodeRef device, TaskRequest task, double tMax, List<Use> uses) {
+	private Option mec(NodeRef device, TaskRequest task, double tMax, List<Use> uses, int unseen) {
 		NodeRef server = serverOf.get(device);
 		if (server == null)
 			return null;
@@ -459,16 +495,18 @@ public class Mvtora extends OrchestrationPolicy {
 		double headroom = params.beta() + tMax - transfer;
 		if (!(headroom > 0))
 			return null;
-		// Algorithm 2 over the MEC tasks of this server and the new one
+		// Algorithm 2 over the MEC tasks of this server, the unseen ones (taken to be
+		// like this one) and the new one
 		List<Use> onServer = new ArrayList<>();
 		for (Use u : uses)
 			if (u.node().equals(server) && u.headroom() > 0)
 				onServer.add(u);
-		double[] work = new double[onServer.size() + 1];
+		double[] work = new double[onServer.size() + unseen + 1];
 		double[] room = new double[work.length];
-		for (int i = 0; i < onServer.size(); i++) {
-			work[i] = onServer.get(i).work();
-			room[i] = onServer.get(i).headroom();
+		for (int i = 0; i < work.length - 1; i++) {
+			boolean listed = i < onServer.size();
+			work[i] = listed ? onServer.get(i).work() : task.lengthMi();
+			room[i] = listed ? onServer.get(i).headroom() : headroom;
 		}
 		work[work.length - 1] = task.lengthMi();
 		room[room.length - 1] = headroom;

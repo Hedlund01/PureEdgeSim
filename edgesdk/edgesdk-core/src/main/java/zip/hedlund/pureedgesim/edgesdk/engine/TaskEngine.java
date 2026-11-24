@@ -287,16 +287,6 @@ final class TaskEngine {
 				p.attempt.state.lost(TaskOutcome.NODE_CRASHED);
 	}
 
-	/** @return the executing node, or the nodes of a split joined by {@code +} */
-	private static String executedOn(Attempt a) {
-		if (a == null)
-			return "";
-		StringBuilder out = new StringBuilder();
-		for (Part p : a.parts)
-			out.append(out.isEmpty() ? "" : "+").append(p.target.decl().name());
-		return out.toString();
-	}
-
 	private static TaskOutcome map(LossReason reason) {
 		return switch (reason) {
 		case NO_ROUTE -> TaskOutcome.NO_ROUTE;
@@ -342,9 +332,11 @@ final class TaskEngine {
 				outcome = TaskOutcome.TIMED_OUT;
 			double created = s.request.createdAt();
 			out.add(new TaskRecord(s.request.id(), s.request.device().name(), s.request.workload(), created,
-					s.request.deadline(), outcome, executedOn(s.executed),
+					s.request.deadline(), outcome, s.executed == null ? "" : s.executed.main().decl().name(),
 					s.completedAt, s.attempts, world.faultLog().partitionActive(created),
-					world.faultLog().faultActive(created)));
+					world.faultLog().faultActive(created),
+					s.executed == null ? List.of()
+							: s.executed.parts.stream().map(p -> p.target.decl().name()).toList()));
 		}
 		return out;
 	}

@@ -10,8 +10,9 @@ import zip.hedlund.pureedgesim.edgesdk.model.NodeRef;
 
 /**
  * Where an attempt of a task runs: on the device itself, on another node, split
- * into parts that run in parallel on several nodes, or nowhere. An attempt can carry a retry timer: when its result is not back after
- * {@code retryAfter} seconds, the policy is asked again through
+ * into parts that run in parallel on several nodes, or nowhere. An attempt can
+ * carry a retry timer: when its result is not back after {@code retryAfter}
+ * seconds, the policy is asked again through
  * {@link OrchestrationPolicy#onAttemptTimedOut}. The timer is local to the
  * device, so this is an honest timeout, not a failure notification.
  */
@@ -50,6 +51,10 @@ public final class Placement {
 	 * Splits the task into independent parts that run in parallel, one per node
 	 * (the device itself may take a part). A part gets its share of the task's
 	 * length, input and output; the result is back when every part's result is.
+	 * <p>
+	 * A part that is lost loses the whole attempt: the other parts' results do not
+	 * complete it. Set {@link #withRetryAfter} to be asked again; the retry hook
+	 * then names the first part still without a result.
 	 *
 	 * @param shares the share of the task per node; normalised to sum to 1, zero
 	 *               shares are left out

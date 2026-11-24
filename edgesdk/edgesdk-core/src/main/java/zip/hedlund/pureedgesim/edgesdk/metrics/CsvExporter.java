@@ -104,7 +104,7 @@ public final class CsvExporter {
 		List<String> params = paramNames(runs);
 		try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
 			w.write(idHeader(params) + ",task_id,device,workload,created_at,deadline,outcome,executed_on,completed_at,"
-					+ "latency_s,attempts,during_partition,during_fault");
+					+ "latency_s,attempts,during_partition,during_fault,parts");
 			w.newLine();
 			for (RunResult r : runs) {
 				String id = id(r, params);
@@ -112,7 +112,8 @@ public final class CsvExporter {
 					w.write(id + ',' + t.id() + ',' + cell(t.device()) + ',' + cell(t.workload()) + ','
 							+ num(t.createdAt()) + ',' + num(t.deadline()) + ',' + t.outcome() + ','
 							+ cell(t.executedOn()) + ',' + num(t.completedAt()) + ',' + num(t.latency()) + ','
-							+ t.attempts() + ',' + t.duringPartition() + ',' + t.duringFault());
+							+ t.attempts() + ',' + t.duringPartition() + ',' + t.duringFault() + ','
+							+ cell(String.join("+", t.parts())));
 					w.newLine();
 				}
 			}

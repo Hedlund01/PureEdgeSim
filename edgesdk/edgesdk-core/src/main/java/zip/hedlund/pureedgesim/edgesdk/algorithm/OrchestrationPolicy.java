@@ -33,7 +33,8 @@ public abstract class OrchestrationPolicy extends Algorithm {
 	 *
 	 * @param device  the device
 	 * @param task    the task
-	 * @param tried   the node of the attempt that timed out (the device for local)
+	 * @param tried   the node of the attempt that timed out (the device for local;
+	 *                for a split, the first part still without a result)
 	 * @param attempt the number of attempts so far
 	 */
 	public Placement onAttemptTimedOut(NodeRef device, TaskRequest task, NodeRef tried, int attempt) {
