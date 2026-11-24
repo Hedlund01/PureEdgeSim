@@ -51,6 +51,8 @@ final class TaskEngine {
 		boolean rejected;
 		boolean deviceDown;
 		boolean deadlinePassed;
+		/** The result arrived after the deadline event had already counted the task as failed. */
+		boolean late;
 		TaskOutcome lastLoss;
 		SdkNode executedOn;
 		double completedAt = Double.NaN;
@@ -189,14 +191,15 @@ final class TaskEngine {
 			return;
 		s.completedAt = world.now();
 		s.executedOn = a.target;
-		boolean late = s.completedAt > s.request.deadline();
-		if (!late) {
+		// deadline() already counted the task as failed; also when both fall at the same instant
+		s.late = s.deadlinePassed;
+		if (!s.late) {
 			doneInWindow++;
 			succeeded++;
 			finished++;
 		}
 		policy.onTaskCompleted(s.request.device(),
-				new TaskReport(s.request, a.target.ref(), s.completedAt, s.attempts, late));
+				new TaskReport(s.request, a.target.ref(), s.completedAt, s.attempts, s.late));
 	}
 
 	private void deadline(State s) {
@@ -236,6 +239,14 @@ final class TaskEngine {
 		return w;
 	}
 
+	/**
+	 * The share of finished tasks that failed. A task finishes either when its
+	 * result arrives before its deadline (success) or when its deadline passes
+	 * without a result (failure). A result that arrives once the deadline has
+	 * passed, including at the same instant after the deadline was checked, does
+	 * not change that: the task stays a failure, recorded as
+	 * {@link TaskOutcome#LATE}. The timeline windows count the same way.
+	 */
 	double failurePct() {
 		return finished == 0 ? 0 : 100.0 * (finished - succeeded) / finished;
 	}
@@ -245,7 +256,7 @@ final class TaskEngine {
 		for (State s : states) {
 			TaskOutcome outcome;
 			if (s.hasResult())
-				outcome = s.completedAt <= s.request.deadline() ? TaskOutcome.SUCCESS : TaskOutcome.LATE;
+				outcome = s.late ? TaskOutcome.LATE : TaskOutcome.SUCCESS;
 			else if (s.deviceDown)
 				outcome = TaskOutcome.DEVICE_DOWN;
 			else if (s.rejected)

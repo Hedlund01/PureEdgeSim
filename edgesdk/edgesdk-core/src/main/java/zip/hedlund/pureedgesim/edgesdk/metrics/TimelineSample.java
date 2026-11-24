@@ -9,7 +9,8 @@ package zip.hedlund.pureedgesim.edgesdk.metrics;
  * @param nodesDown        crashed or dead nodes
  * @param partitionActive  a partition is active
  * @param tasksDone        tasks that succeeded in the window
- * @param tasksFailed      tasks that failed (any outcome but success) in the window
+ * @param tasksFailed      tasks whose deadline passed without a result in the window (any outcome
+ *                         but success; a {@link TaskOutcome#LATE} task counts when its deadline passes)
  * @param successPct       success share of the tasks finished in the window, or NaN
  * @param divergentKeys    keys whose live replicas hold different versions
  * @param controlBytes     algorithm message bytes sent in the window

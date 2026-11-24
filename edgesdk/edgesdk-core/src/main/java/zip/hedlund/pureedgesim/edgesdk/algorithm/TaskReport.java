@@ -9,7 +9,7 @@ import zip.hedlund.pureedgesim.edgesdk.model.NodeRef;
  * @param executedOn  the node that executed it
  * @param completedAt when the result reached the device
  * @param attempts    how many attempts the policy made
- * @param late        true when it arrived after the deadline
+ * @param late        true when it arrived after the deadline was checked (the task counts as failed)
  */
 public record TaskReport(TaskRequest task, NodeRef executedOn, double completedAt, int attempts, boolean late) {
 

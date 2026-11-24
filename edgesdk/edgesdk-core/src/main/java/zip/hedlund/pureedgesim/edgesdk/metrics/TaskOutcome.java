@@ -5,9 +5,12 @@ package zip.hedlund.pureedgesim.edgesdk.metrics;
  * for the metrics only; the algorithm never learns the reason.
  */
 public enum TaskOutcome {
-	/** The result reached the device before the deadline. */
+	/** The result reached the device before the deadline was checked. */
 	SUCCESS,
-	/** The result reached the device after the deadline. */
+	/**
+	 * The result reached the device after the deadline was checked (also at the
+	 * same instant); counted as a failure in the failure rate and the timeline.
+	 */
 	LATE,
 	/** The policy rejected the task. */
 	REJECTED,
