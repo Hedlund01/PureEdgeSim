@@ -51,7 +51,7 @@ final class TaskEngine {
 		boolean rejected;
 		boolean deviceDown;
 		boolean deadlinePassed;
-		/** The result arrived after the deadline event had already counted the task as failed. */
+		/** The result arrived at or after the deadline, which counted the task as failed. */
 		boolean late;
 		/**
 		 * The first loss of any attempt: the cause that made the task need a retry.
@@ -199,9 +199,12 @@ final class TaskEngine {
 		State s = a.state;
 		if (s.hasResult())
 			return;
+		// the deadline is exclusive: a result at the deadline instant is late, whichever event runs first
+		if (!s.deadlinePassed && world.now() >= s.request.deadline())
+			deadline(s);
 		s.completedAt = world.now();
 		s.executedOn = a.target;
-		// deadline() already counted the task as failed; also when both fall at the same instant
+		// deadline() already counted the task as failed
 		s.late = s.deadlinePassed;
 		if (!s.late) {
 			doneInWindow++;
@@ -252,9 +255,9 @@ final class TaskEngine {
 	/**
 	 * The share of finished tasks that failed. A task finishes either when its
 	 * result arrives before its deadline (success) or when its deadline passes
-	 * without a result (failure). A result that arrives once the deadline has
-	 * passed, including at the same instant after the deadline was checked, does
-	 * not change that: the task stays a failure, recorded as
+	 * without a result (failure). The deadline is exclusive: a result that arrives
+	 * at or after it does not change that, whatever order the simulator runs the
+	 * two events in at a tie; the task stays a failure, recorded as
 	 * {@link TaskOutcome#LATE}. The timeline windows count the same way.
 	 */
 	double failurePct() {

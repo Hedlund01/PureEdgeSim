@@ -75,6 +75,11 @@ class TaskAccountingIT {
 		assertEquals(ok, done);
 		assertEquals(tasks.size() - ok, failed);
 		assertTrue(tasks.stream().anyMatch(t -> t.outcome() == TaskOutcome.LATE));
+		// the deadline is exclusive, whichever event the simulator runs first at the tie
+		assertTrue(tasks.stream().filter(t -> t.completedAt() >= t.deadline())
+				.allMatch(t -> t.outcome() == TaskOutcome.LATE));
+		assertTrue(tasks.stream().filter(t -> t.outcome() == TaskOutcome.SUCCESS)
+				.allMatch(t -> t.completedAt() < t.deadline()));
 	}
 
 	@Test
