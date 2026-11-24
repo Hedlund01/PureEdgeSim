@@ -1,6 +1,7 @@
 package zip.hedlund.pureedgesim.edgesdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -130,5 +131,15 @@ class ExperimentIT {
 		assertEquals("p0-link_flaps_5s-r0-my_algo_v2", run.data().runId());
 		assertEquals("my algo/v2", run.candidate());
 		assertEquals("link flaps/5s", run.condition());
+	}
+
+	@Test
+	void namesThatCollideInRunIdsAreRejected() {
+		Experiment e = Experiment.on(TestScenarios.twoRegions(1).duration(30).build())
+				.candidate(Candidate.of("a/b", NearestByDesign::new));
+		assertThrows(IllegalArgumentException.class, () -> e.candidate(Candidate.of("a_b", CloudOnly::new)));
+		e.faultModels(StochasticFaultModel.links(60, 5).named("flaps 5s"));
+		assertThrows(IllegalArgumentException.class,
+				() -> e.faultModels(StochasticFaultModel.links(30, 5).named("flaps_5s")));
 	}
 }

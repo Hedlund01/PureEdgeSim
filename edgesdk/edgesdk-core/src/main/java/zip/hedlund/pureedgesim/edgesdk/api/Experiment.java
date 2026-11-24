@@ -70,6 +70,11 @@ public final class Experiment {
 	public Experiment candidate(Candidate c) {
 		if (candidates.stream().anyMatch(x -> x.name().equals(c.name())))
 			throw new IllegalArgumentException("duplicate candidate \"" + c.name() + "\"");
+		// run ids hold the file-safe name: two names that map to the same one would share output
+		for (Candidate x : candidates)
+			if (fileSafe(x.name()).equals(fileSafe(c.name())))
+				throw new IllegalArgumentException("candidates \"" + x.name() + "\" and \"" + c.name()
+						+ "\" both become \"" + fileSafe(c.name()) + "\" in run ids");
 		candidates.add(c);
 		return this;
 	}
@@ -82,7 +87,13 @@ public final class Experiment {
 
 	/** Runs every candidate under each of these fault models (default: the scenario's). */
 	public Experiment faultModels(FaultModel... models) {
-		faultModels.addAll(List.of(models));
+		for (FaultModel m : models) {
+			for (FaultModel x : faultModels)
+				if (fileSafe(x.label()).equals(fileSafe(m.label())))
+					throw new IllegalArgumentException("fault models \"" + x.label() + "\" and \"" + m.label()
+							+ "\" both become \"" + fileSafe(m.label()) + "\" in run ids");
+			faultModels.add(m);
+		}
 		return this;
 	}
 
