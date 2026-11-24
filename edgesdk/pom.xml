@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<!-- Edge SDK: a developer-facing layer on top of PureEdgeSim. It depends on the
+	core artifact only (install it first with `mvn install -DskipTests` at the
+	repository root) and never modifies the core sources. -->
+	<groupId>zip.hedlund</groupId>
+	<artifactId>edgesdk-parent</artifactId>
+	<version>0.1.0-SNAPSHOT</version>
+	<packaging>pom</packaging>
+	<name>PureEdgeSim Edge SDK (parent)</name>
+	<description>Fluent and class-based SDK for fault-tolerance experiments under network
+		partitions, built on PureEdgeSim.</description>
+
+	<modules>
+		<module>edgesdk-core</module>
+		<module>edgesdk-examples</module>
+	</modules>
+
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<maven.compiler.release>17</maven.compiler.release>
+		<pureedgesim.version>6.1</pureedgesim.version>
+		<junit.version>5.8.2</junit.version>
+	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>io.github.charafeddinemechalikh</groupId>
+				<artifactId>pureedgesim</artifactId>
+				<version>${pureedgesim.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>zip.hedlund</groupId>
+				<artifactId>edgesdk-core</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.junit.jupiter</groupId>
+				<artifactId>junit-jupiter</artifactId>
+				<version>${junit.version}</version>
+				<scope>test</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<build>
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.13.0</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-surefire-plugin</artifactId>
+					<version>3.2.5</version>
+					<configuration>
+						<!-- Unit tests (*Test) and the small end-to-end
+						simulations (*IT, tagged "integration"). -->
+						<includes>
+							<include>**/*Test.java</include>
+							<include>**/*IT.java</include>
+						</includes>
+					</configuration>
+				</plugin>
+				<plugin>
+					<groupId>org.codehaus.mojo</groupId>
+					<artifactId>exec-maven-plugin</artifactId>
+					<version>3.1.0</version>
+				</plugin>
+			</plugins>
+		</pluginManagement>
+	</build>
+
+	<profiles>
+		<!-- Unit tests only: skips the tests tagged "integration", which run small
+		end-to-end simulations. -->
+		<profile>
+			<id>unit-tests</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<excludedGroups>integration</excludedGroups>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+</project>

@@ -72,6 +72,7 @@ Mechalikh, C., Silem, A. E. H., Safavifar, Z., & Golpayegani, F. (2025). Quality
 - [Key features](#key-features)
 - [Quick start](#quick-start)
 - [Use PureEdgeSim as a dependency](#use-pureedgesim-as-a-dependency)
+- [Edge SDK: fault tolerance under network partitions](#edge-sdk-fault-tolerance-under-network-partitions)
 - [Documentation and examples](#documentation-and-examples)
 - [Performance and scalability](#performance-and-scalability)
 - [Design goals and validation](#design-goals-and-validation)
@@ -311,6 +312,36 @@ dependencies {
   implementation 'io.github.charafeddinemechalikh:pureedgesim:6.1'
 }
 ```
+
+## Edge SDK: fault tolerance under network partitions
+
+[`edgesdk/`](edgesdk/README.md) is a developer-facing layer built on top of PureEdgeSim **without modifying the core**. It is a separate Maven project with two modules, `edgesdk-core` and `edgesdk-examples`, packaged as `zip.hedlund.pureedgesim.edgesdk`. You describe a whole edge-to-cloud system with a fluent builder and presets (UAVs, trucks, roadside servers, clouds, LoRa, Wi-Fi, 4G/5G, fibre…), inject stochastic, scripted or mobility-driven faults (crashes, link failures, degradations, partitions), and compare offloading and storage algorithms under identical conditions. The algorithms are never told about faults: they must detect them from their own messages.
+
+```bash
+mvn install -DskipTests                     # PureEdgeSim into the local Maven repository
+mvn -f edgesdk/pom.xml install              # build and test the SDK
+mvn -f edgesdk/pom.xml -pl edgesdk-examples exec:java \
+    -Dexec.mainClass=zip.hedlund.pureedgesim.edgesdk.examples.Story8CompareAlgorithms
+```
+
+```java
+Scenario s = Scenario.builder("swarm")
+    .addEdgeNode("truck", EdgePresets.TRUCK_SERVER).addEndDevices(DevicePresets.UAV, 12, Layout.near("truck", 60))
+    .addCloud("cloud", CloudPresets.REGIONAL_DC)
+    .connect(Select.tier(Tier.END_DEVICE), Select.name("truck"), ChannelPresets.WIFI)
+    .connect("truck", "cloud", ChannelPresets.CELLULAR_5G.withRangeM(Double.POSITIVE_INFINITY))
+    .withWorkload(WorkloadPresets.VIDEO_ANALYTICS)
+    .withFaults(FaultScript.parse("120s partition truck,uav-* | cloud for 60s")).build();
+Experiment.on(s).candidate(Candidate.of("cloud-only", CloudOnly::new))
+    .candidate(Candidate.of("heartbeat", HeartbeatFallback::new)).replications(5).run(Path.of("output/swarm"));
+```
+
+The SDK documentation:
+
+- [SDK quick start](edgesdk/README.md)
+- [Architecture analysis: extension points, gaps and workarounds](docs/architecture-analysis.md)
+- [User stories and examples](docs/user-stories.md)
+- [Preset values and their justification](docs/edgesdk-presets.md)
 
 ## Documentation and examples
 

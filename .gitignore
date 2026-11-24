@@ -33,3 +33,7 @@ Desktop.ini
 cp.txt
 hs_err_pid*
 test-output/
+
+# Edge SDK results
+/edgesdk/output/
+/edgesdk/*/output/
