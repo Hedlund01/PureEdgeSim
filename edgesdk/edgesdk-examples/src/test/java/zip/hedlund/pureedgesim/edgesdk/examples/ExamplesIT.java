@@ -81,4 +81,10 @@ class ExamplesIT {
 		Story8CompareAlgorithms.main(new String[0]);
 		ran("story8");
 	}
+
+	@Test
+	void story9() {
+		Story9Flocky.main(new String[0]);
+		ran("story9");
+	}
 }
