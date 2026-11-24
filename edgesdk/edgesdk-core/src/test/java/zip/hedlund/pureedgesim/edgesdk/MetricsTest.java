@@ -25,6 +25,19 @@ class MetricsTest {
 	}
 
 	@Test
+	void ci95UsesStudentTBeyondThirtyReplications() {
+		// exact two-sided 95 % t quantiles for 31, 40, 60 and 120 degrees of freedom
+		double[][] cases = { { 32, 2.039513 }, { 41, 2.021075 }, { 61, 2.000298 }, { 121, 1.979930 } };
+		for (double[] c : cases) {
+			double[] v = new double[(int) c[0]];
+			for (int i = 0; i < v.length; i++)
+				v[i] = i % 7;
+			double se = Stats.std(v) / Math.sqrt(v.length);
+			assertEquals(c[1], Stats.ci95(v) / se, 1e-5, "n = " + v.length);
+		}
+	}
+
+	@Test
 	void directions() {
 		assertTrue(Direction.HIGHER_IS_BETTER.better(2, 1));
 		assertTrue(Direction.LOWER_IS_BETTER.better(1, 2));

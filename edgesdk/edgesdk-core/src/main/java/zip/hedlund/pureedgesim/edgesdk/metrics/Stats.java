@@ -41,8 +41,23 @@ public final class Stats {
 		if (v.length < 2)
 			return Double.NaN;
 		int df = v.length - 1;
-		double t = df <= T95.length ? T95[df - 1] : 1.96;
-		return t * std(v) / Math.sqrt(v.length);
+		return t95(df) * std(v) / Math.sqrt(v.length);
+	}
+
+	/**
+	 * Two-sided 95 % Student t quantile: the table up to 30 degrees of freedom,
+	 * beyond it the Cornish-Fisher expansion around the normal quantile
+	 * (Abramowitz &amp; Stegun 26.7.5), accurate to 1e-5 there.
+	 */
+	static double t95(int df) {
+		if (df <= T95.length)
+			return T95[df - 1];
+		double z = 1.959963984540054;
+		double z2 = z * z, z3 = z2 * z, z5 = z3 * z2, z7 = z5 * z2, z9 = z7 * z2;
+		double n = df;
+		return z + (z3 + z) / (4 * n) + (5 * z5 + 16 * z3 + 3 * z) / (96 * n * n)
+				+ (3 * z7 + 19 * z5 + 17 * z3 - 15 * z) / (384 * n * n * n)
+				+ (79 * z9 + 776 * z7 + 1482 * z5 - 1920 * z3 - 945 * z) / (92160 * n * n * n * n);
 	}
 
 	/** Percentile by linear interpolation, p in [0, 100]; NaN when empty. */
