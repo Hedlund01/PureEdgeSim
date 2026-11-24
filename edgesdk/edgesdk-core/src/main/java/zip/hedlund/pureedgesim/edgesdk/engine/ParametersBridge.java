@@ -2,11 +2,15 @@ package zip.hedlund.pureedgesim.edgesdk.engine;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 
 import com.mechalikh.pureedgesim.distribution.Randomness;
 import com.mechalikh.pureedgesim.scenariomanager.SimulationParameters;
@@ -26,6 +30,33 @@ import zip.hedlund.pureedgesim.edgesdk.model.Tier;
 public final class ParametersBridge {
 
 	private ParametersBridge() {
+	}
+
+	/**
+	 * Captures every static setting of {@link SimulationParameters}, so that a run,
+	 * even one that fails half-way through {@link #apply}, leaves them as it found
+	 * them.
+	 *
+	 * @return an action that puts the captured values back
+	 */
+	public static Runnable snapshot() {
+		Map<Field, Object> values = new LinkedHashMap<>();
+		try {
+			for (Field f : SimulationParameters.class.getDeclaredFields())
+				if (Modifier.isStatic(f.getModifiers()) && !Modifier.isFinal(f.getModifiers())) {
+					f.setAccessible(true);
+					values.put(f, f.get(null));
+				}
+		} catch (IllegalAccessException e) {
+			throw new IllegalStateException(e);
+		}
+		return () -> values.forEach((f, v) -> {
+			try {
+				f.set(null, v);
+			} catch (IllegalAccessException e) {
+				throw new IllegalStateException(e);
+			}
+		});
 	}
 
 	public static void apply(RunSpec run) {
