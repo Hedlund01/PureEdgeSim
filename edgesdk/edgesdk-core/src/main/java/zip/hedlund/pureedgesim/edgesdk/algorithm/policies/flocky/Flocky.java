@@ -42,7 +42,11 @@ import zip.hedlund.pureedgesim.edgesdk.model.Tier;
  * {@code swirlyPeriod} seconds and migrated when their node leaves the
  * neighbourhood, loses the deployment or stops meeting the traits.</li>
  * <li><b>Deployment</b>: accepts a definition when it fits in what is not
- * reserved yet, counts its clients, and frees it when the last one leaves.</li>
+ * reserved yet, and frees it when the last client leaves. A client holds a
+ * lease that it renews every {@code swirlyPeriod} seconds; a client that stops
+ * renewing (partitioned, rebooted, or that gave up waiting for the answer)
+ * expires after {@link #lease(double) the lease time}, so a lost undeploy
+ * message cannot keep resources reserved forever.</li>
  * </ul>
  * Tasks go to the device's current deployment of their component. While a
  * component has no deployment, or when an attempt gets no result within
@@ -69,6 +73,9 @@ public class Flocky extends OrchestrationPolicy {
 	record Undeploy(String definition) {
 	}
 
+	record Renew(Component component, ComponentDefinition definition) {
+	}
+
 	private static final GetSummary GET_SUMMARY = new GetSummary();
 
 	/** A component of a node's application, deployed on another node. */
@@ -81,13 +88,16 @@ public class Flocky extends OrchestrationPolicy {
 		final Map<NodeRef, NodeSummary> metadata = new TreeMap<>();
 		// Deployment service
 		final Map<String, ComponentDefinition> hosted = new TreeMap<>();
-		final Map<String, Set<NodeRef>> clients = new HashMap<>();
+		/** Clients of each hosted definition, with the time their lease expires. */
+		final Map<String, Map<NodeRef, Double>> clients = new HashMap<>();
 		double reservedCores;
 		double reservedRamMb;
 		// Swirly
 		final Set<String> application = new LinkedHashSet<>();
 		final Map<String, Deployment> deployments = new TreeMap<>();
 		final Set<String> orchestrating = new TreeSet<>();
+		/** Components whose last deployment round failed; counted once until one succeeds. */
+		final Set<String> failing = new TreeSet<>();
 		final Map<NodeRef, Double> avoidUntil = new HashMap<>();
 	}
 
@@ -107,6 +117,7 @@ public class Flocky extends OrchestrationPolicy {
 	private double swirlyPeriod = 2;
 	private double deployTimeout = 0.5;
 	private double retryFraction = 0.6;
+	private double lease = Double.NaN;
 	private boolean fallbackLocal = true;
 
 	private FlockyDiscovery discovery;
@@ -200,6 +211,19 @@ public class Flocky extends OrchestrationPolicy {
 		this.pingTimeout = requestTimeout;
 		this.deployTimeout = requestTimeout;
 		return this;
+	}
+
+	/**
+	 * How long a host keeps a client that stopped renewing; three Swirly periods
+	 * by default.
+	 */
+	public Flocky lease(double seconds) {
+		this.lease = seconds;
+		return this;
+	}
+
+	private double leaseTime() {
+		return Double.isNaN(lease) ? 3 * swirlyPeriod : lease;
 	}
 
 	/** Retries a task elsewhere after this fraction of its deadline without a result (0.6). */
@@ -315,6 +339,7 @@ public class Flocky extends OrchestrationPolicy {
 	}
 
 	private NodeSummary summary(NodeRef at) {
+		expireLeases(at);
 		NodeState s = state.at(at);
 		var spec = ctx.topology().node(at).spec();
 		Map<String, Integer> deployed = new TreeMap<>();
@@ -326,8 +351,12 @@ public class Flocky extends OrchestrationPolicy {
 
 	// ---- Swirly service -----------------------------------------------------
 
-	/** Evolution: drops deployments that no longer hold, and deploys what is missing. */
+	/**
+	 * Evolution: drops deployments that no longer hold, renews the leases of the
+	 * others, and deploys what is missing. Also expires the leases this node hosts.
+	 */
 	private void evolve(NodeRef at) {
+		expireLeases(at);
 		NodeState s = state.at(at);
 		Set<NodeRef> known = discovery.known(at);
 		for (String c : List.copyOf(s.application)) {
@@ -339,6 +368,8 @@ public class Flocky extends OrchestrationPolicy {
 				boolean violated = n != null && !n.matches(component(c), d.definition());
 				if (gone || lost || violated)
 					drop(at, c);
+				else
+					ctx.send(at, d.node(), 64 + ComponentDefinition.BYTES, new Renew(component(c), d.definition()));
 			}
 			if (!s.deployments.containsKey(c))
 				orchestrate(at, c);
@@ -373,6 +404,11 @@ public class Flocky extends OrchestrationPolicy {
 		options.sort(Comparator.comparing((QoeEvaluator.Option o) -> !o.node().hasDeployed(o.definition()))
 				.thenComparing(o -> -score.get(o)).thenComparing(o -> o.node().node())
 				.thenComparing(o -> o.definition().name()));
+		if (options.isEmpty()) {
+			// nothing to ask yet (no metadata or no definition): not a failed deployment
+			s.orchestrating.remove(c);
+			return;
+		}
 		tryDeploy(at, c, options, 0);
 	}
 
@@ -380,7 +416,8 @@ public class Flocky extends OrchestrationPolicy {
 		NodeState s = state.at(at);
 		if (i >= options.size()) {
 			s.orchestrating.remove(c);
-			ctx.metrics().add("flocky.deploy_failures", 1);
+			if (s.failing.add(c))
+				ctx.metrics().add("flocky.deploy_failures", 1);
 			return;
 		}
 		QoeEvaluator.Option o = options.get(i);
@@ -389,6 +426,7 @@ public class Flocky extends OrchestrationPolicy {
 				deployTimeout, reply -> {
 					if (Boolean.TRUE.equals(reply.payload())) {
 						s.orchestrating.remove(c);
+						s.failing.remove(c);
 						s.deployments.put(c, new Deployment(target, o.definition(), ctx.now()));
 						ctx.metrics().add("flocky.deployments", 1);
 					} else
@@ -420,15 +458,29 @@ public class Flocky extends OrchestrationPolicy {
 			s.reservedCores += def.cores();
 			s.reservedRamMb += def.ramMb();
 		}
-		s.clients.computeIfAbsent(def.name(), k -> new TreeSet<>()).add(client);
+		s.clients.computeIfAbsent(def.name(), k -> new TreeMap<>()).put(client, ctx.now() + leaseTime());
 		return true;
 	}
 
 	private void undeploy(NodeRef at, NodeRef client, String def) {
+		Map<NodeRef, Double> c = state.at(at).clients.get(def);
+		if (c != null && c.remove(client) != null && c.isEmpty())
+			release(at, def);
+	}
+
+	private void expireLeases(NodeRef at) {
 		NodeState s = state.at(at);
-		Set<NodeRef> c = s.clients.get(def);
-		if (c == null || !c.remove(client) || !c.isEmpty())
-			return;
+		for (String def : List.copyOf(s.clients.keySet())) {
+			Map<NodeRef, Double> c = s.clients.get(def);
+			if (c.values().removeIf(expiry -> expiry < ctx.now()) && c.isEmpty()) {
+				release(at, def);
+				ctx.metrics().add("flocky.leases_expired", 1);
+			}
+		}
+	}
+
+	private void release(NodeRef at, String def) {
+		NodeState s = state.at(at);
 		s.clients.remove(def);
 		ComponentDefinition d = s.hosted.remove(def);
 		s.reservedCores -= d.cores();
@@ -455,6 +507,9 @@ public class Flocky extends OrchestrationPolicy {
 	public void onMessage(NodeRef at, NodeRef from, Object payload) {
 		if (payload instanceof Undeploy u)
 			undeploy(at, from, u.definition());
+		else if (payload instanceof Renew r)
+			// re-registers the client, or deploys again if the host lost it and it still fits
+			deploy(at, from, r.component(), r.definition());
 	}
 
 	// ---- introspection ------------------------------------------------------
@@ -472,7 +527,7 @@ public class Flocky extends OrchestrationPolicy {
 	/** @return the definitions deployed on a node, by name, with their clients */
 	public Map<String, Set<NodeRef>> hosted(NodeRef at) {
 		Map<String, Set<NodeRef>> out = new TreeMap<>();
-		state.at(at).clients.forEach((d, c) -> out.put(d, Set.copyOf(c)));
+		state.at(at).clients.forEach((d, c) -> out.put(d, Set.copyOf(c.keySet())));
 		return out;
 	}
 

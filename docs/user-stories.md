@@ -165,7 +165,8 @@ Acceptance criteria:
 - [x] Applications are OAM `Component`s with required and optional traits; each can have several `ComponentDefinition`s (resources, workload type, traits they provide). A task of workload `w` is a request to component `w`.
 - [x] Swirly matches definitions and nodes on workload type, traits and unreserved resources, reuses existing deployments first, ranks the rest with a `QoeEvaluator` (`LEGACY` by latency, or `scored()`), and asks nodes to deploy in turn.
 - [x] Deployments are re-checked and migrated when their node leaves the neighbourhood, loses the deployment (a reboot) or stops answering tasks.
-- [x] Custom metrics: `flocky.deployments`, `flocky.migrations`, `flocky.deploy_failures`, `flocky.discovery_rounds`, `flocky.known_nodes`.
+- [x] Hosts hold each client on a lease that the client renews every Swirly period, so a lost undeploy, a late deploy reply or a crashed client cannot keep resources reserved.
+- [x] Custom metrics: `flocky.deployments`, `flocky.migrations`, `flocky.deploy_failures` (once per failure streak of a component), `flocky.leases_expired`, `flocky.discovery_rounds`, `flocky.known_nodes`.
 
 Example: [`Story9Flocky`](../edgesdk/edgesdk-examples/src/main/java/zip/hedlund/pureedgesim/edgesdk/examples/Story9Flocky.java).
 Flocky with both evaluators against `NearestByDesign` and `HeartbeatFallback`

@@ -116,8 +116,12 @@ public final class FlockyDiscovery {
 		return adjustedDistance(state.at(at).known.size());
 	}
 
-	/** AdjustedDistance of Algorithm 1. */
 	double adjustedDistance(int known) {
+		return adjustedDistance(maxRtt, assumedDensity, known);
+	}
+
+	/** AdjustedDistance of Algorithm 1. */
+	static double adjustedDistance(double maxRtt, double assumedDensity, int known) {
 		return maxRtt * Math.max(1, Math.sqrt(assumedDensity / Math.max(1, known)));
 	}
 
@@ -143,6 +147,7 @@ public final class FlockyDiscovery {
 		final NodeRef at;
 		final State s;
 		final Deque<NodeRef> check = new ArrayDeque<>();
+		final Set<NodeRef> queued = new HashSet<>();
 		final Set<NodeRef> ignore = new HashSet<>();
 		double dmin = Double.POSITIVE_INFINITY;
 		boolean inReach;
@@ -154,6 +159,7 @@ public final class FlockyDiscovery {
 			start.addAll(s.fresh);
 			s.fresh.clear();
 			check.addAll(start);
+			queued.addAll(start);
 		}
 
 		void next() {
@@ -164,6 +170,7 @@ public final class FlockyDiscovery {
 				return;
 			}
 			NodeRef nc = check.pollFirst();
+			queued.remove(nc);
 			ctx.request(at, nc, PING_BYTES, PING, pingTimeout, reply -> visited(nc, reply.rtt()),
 					() -> visited(nc, Double.POSITIVE_INFINITY));
 		}
@@ -199,7 +206,7 @@ public final class FlockyDiscovery {
 				// depth first: the nodes found are checked next
 				for (int i = found.size() - 1; i >= 0; i--) {
 					NodeRef n = found.get(i);
-					if (!n.equals(at) && !ignore.contains(n) && !s.known.contains(n) && !check.contains(n))
+					if (!n.equals(at) && !ignore.contains(n) && !s.known.contains(n) && queued.add(n))
 						check.addFirst(n);
 				}
 				next();
