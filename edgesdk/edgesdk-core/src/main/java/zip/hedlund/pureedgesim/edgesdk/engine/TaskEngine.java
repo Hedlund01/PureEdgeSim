@@ -24,21 +24,50 @@ import zip.hedlund.pureedgesim.edgesdk.network.Transfer;
 /**
  * The life of a task: created at its device (the workload is drawn before the
  * run from the workload seed), placed by the policy, sent as input, executed on a
- * PureEdgeSim node, returned as a result. The first result to reach the device
- * wins; the deadline is checked at the device.
+ * PureEdgeSim node, returned as a result. A split attempt runs its parts in
+ * parallel and has a result once every part's result is back. The first attempt
+ * with a result wins; the deadline is checked at the device.
  */
 final class TaskEngine {
 
-	/** One placement of a task. */
+	/** One placement of a task: one part, or several for a split. */
 	static final class Attempt {
 		final State state;
-		final SdkNode target;
+		final List<Part> parts = new ArrayList<>();
 		final int number;
+		int pending;
 
-		Attempt(State state, SdkNode target, int number) {
+		Attempt(State state, int number) {
 			this.state = state;
-			this.target = target;
 			this.number = number;
+		}
+
+		/** @return the node of the largest part */
+		SdkNode main() {
+			Part best = parts.get(0);
+			for (Part p : parts)
+				if (p.share > best.share)
+					best = p;
+			return best.target;
+		}
+	}
+
+	/** The share of an attempt that runs on one node. */
+	static final class Part {
+		final Attempt attempt;
+		final SdkNode target;
+		final double share;
+		boolean returned;
+
+		Part(Attempt attempt, SdkNode target, double share) {
+			this.attempt = attempt;
+			this.target = target;
+			this.share = share;
+		}
+
+		long scale(long bytes) {
+			// a part of a non-empty transfer carries at least a byte
+			return share == 1 || bytes == 0 ? bytes : Math.max(1, Math.round(bytes * share));
 		}
 	}
 
@@ -59,7 +88,7 @@ final class TaskEngine {
 		 * was lost) do not replace it.
 		 */
 		TaskOutcome firstLoss;
-		SdkNode executedOn;
+		Attempt executed;
 		double completedAt = Double.NaN;
 
 		State(TaskRequest request, WorkloadSpec workload) {
@@ -81,7 +110,7 @@ final class TaskEngine {
 	private final AlgorithmRuntime runtime;
 	private final OrchestrationPolicy policy;
 	private final List<State> states = new ArrayList<>();
-	private final Map<SdkNode, Set<Attempt>> executing = new HashMap<>();
+	private final Map<SdkNode, Set<Part>> executing = new HashMap<>();
 	private int nextCoreTaskId;
 	private int doneInWindow;
 	private int failedInWindow;
@@ -144,55 +173,79 @@ final class TaskEngine {
 			return;
 		}
 		SdkNode device = world.node(s.request.device());
-		SdkNode target = p.isLocal() ? device : world.node(p.node().get());
-		Attempt a = new Attempt(s, target, ++s.attempts);
+		Attempt a = new Attempt(s, ++s.attempts);
+		if (p.isSplit())
+			p.shares().forEach((node, share) -> a.parts.add(new Part(a, world.node(node), share)));
+		else
+			a.parts.add(new Part(a, p.isLocal() ? device : world.node(p.node().get()), 1));
+		a.pending = a.parts.size();
 		if (p.retryAfter() > 0)
 			runtime.schedule(device.ref(), p.retryAfter(), () -> {
 				if (!s.hasResult() && !s.deadlinePassed && device.epoch() == s.deviceEpoch)
-					attempt(s, policy.onAttemptTimedOut(device.ref(), s.request, target.ref(), s.attempts));
+					attempt(s, policy.onAttemptTimedOut(device.ref(), s.request, waitingFor(a), s.attempts));
 			});
-		if (target == device) {
-			execute(a);
-			return;
+		for (Part part : a.parts) {
+			if (part.target == device) {
+				execute(part);
+				continue;
+			}
+			world.network().send(device, part.target, part.scale(s.request.inputBytes()), Transfer.Kind.TASK_INPUT,
+					t -> execute(part), (t, reason) -> s.lost(map(reason)));
 		}
-		world.network().send(device, target, s.request.inputBytes(), Transfer.Kind.TASK_INPUT, t -> execute(a),
-				(t, reason) -> s.lost(map(reason)));
 	}
 
-	private void execute(Attempt a) {
-		if (!a.target.isUp()) {
-			a.state.lost(TaskOutcome.NODE_CRASHED);
+	/** @return the node of the first part of the attempt whose result is not back */
+	private static NodeRef waitingFor(Attempt a) {
+		for (Part p : a.parts)
+			if (!p.returned)
+				return p.target.ref();
+		return a.parts.get(0).target.ref();
+	}
+
+	private void execute(Part p) {
+		State s = p.attempt.state;
+		if (!p.target.isUp()) {
+			s.lost(TaskOutcome.NODE_CRASHED);
 			return;
 		}
-		SdkTask task = new SdkTask(nextCoreTaskId++, a);
-		task.setLength(a.state.request.lengthMi());
-		task.setContainerSizeInBits((long) (a.state.workload.containerMb() * 8_000_000L));
-		task.setFileSizeInBits(a.state.request.inputBytes() * 8);
-		task.setOutputSizeInBits(a.state.request.outputBytes() * 8);
-		task.setMaxLatency(a.state.workload.deadlineS());
-		task.setEdgeDevice(world.node(a.state.request.device()));
-		task.setOffloadingDestination(a.target);
-		executing.computeIfAbsent(a.target, k -> new LinkedHashSet<>()).add(a);
-		a.target.submitTask(task);
+		SdkTask task = new SdkTask(nextCoreTaskId++, p);
+		task.setLength(s.request.lengthMi() * p.share);
+		task.setContainerSizeInBits((long) (s.workload.containerMb() * 8_000_000L));
+		task.setFileSizeInBits(p.scale(s.request.inputBytes()) * 8);
+		task.setOutputSizeInBits(p.scale(s.request.outputBytes()) * 8);
+		task.setMaxLatency(s.workload.deadlineS());
+		task.setEdgeDevice(world.node(s.request.device()));
+		task.setOffloadingDestination(p.target);
+		executing.computeIfAbsent(p.target, k -> new LinkedHashSet<>()).add(p);
+		p.target.submitTask(task);
 	}
 
 	/** PureEdgeSim finished executing a task. */
 	void onExecuted(SdkTask task) {
-		Attempt a = task.attempt;
-		Set<Attempt> running = executing.get(a.target);
-		if (running == null || !running.remove(a))
+		Part p = task.part;
+		Set<Part> running = executing.get(p.target);
+		if (running == null || !running.remove(p))
 			return; // the node crashed in between
-		SdkNode device = world.node(a.state.request.device());
-		if (a.target == device) {
-			resultArrived(a);
+		State s = p.attempt.state;
+		SdkNode device = world.node(s.request.device());
+		if (p.target == device) {
+			partArrived(p);
 			return;
 		}
-		world.network().send(a.target, device, a.state.request.outputBytes(), Transfer.Kind.TASK_RESULT, t -> {
-			if (device.epoch() == a.state.deviceEpoch)
-				resultArrived(a);
+		world.network().send(p.target, device, p.scale(s.request.outputBytes()), Transfer.Kind.TASK_RESULT, t -> {
+			if (device.epoch() == s.deviceEpoch)
+				partArrived(p);
 			else
-				a.state.lost(TaskOutcome.DEVICE_DOWN);
-		}, (t, reason) -> a.state.lost(map(reason)));
+				s.lost(TaskOutcome.DEVICE_DOWN);
+		}, (t, reason) -> s.lost(map(reason)));
+	}
+
+	private void partArrived(Part p) {
+		if (p.returned)
+			return;
+		p.returned = true;
+		if (--p.attempt.pending == 0)
+			resultArrived(p.attempt);
 	}
 
 	private void resultArrived(Attempt a) {
@@ -203,7 +256,7 @@ final class TaskEngine {
 		if (!s.deadlinePassed && world.now() >= s.request.deadline())
 			deadline(s);
 		s.completedAt = world.now();
-		s.executedOn = a.target;
+		s.executed = a;
 		// deadline() already counted the task as failed
 		s.late = s.deadlinePassed;
 		if (!s.late) {
@@ -211,8 +264,8 @@ final class TaskEngine {
 			succeeded++;
 			finished++;
 		}
-		policy.onTaskCompleted(s.request.device(),
-				new TaskReport(s.request, a.target.ref(), s.completedAt, s.attempts, s.late));
+		policy.onTaskCompleted(s.request.device(), new TaskReport(s.request, a.main().ref(), s.completedAt,
+				s.attempts, s.late, a.parts.stream().map(p -> p.target.ref()).toList()));
 	}
 
 	private void deadline(State s) {
@@ -229,10 +282,10 @@ final class TaskEngine {
 	}
 
 	void onNodeCrashed(SdkNode node) {
-		Set<Attempt> running = executing.remove(node);
+		Set<Part> running = executing.remove(node);
 		if (running != null)
-			for (Attempt a : running)
-				a.state.lost(TaskOutcome.NODE_CRASHED);
+			for (Part p : running)
+				p.attempt.state.lost(TaskOutcome.NODE_CRASHED);
 	}
 
 	private static TaskOutcome map(LossReason reason) {
@@ -280,9 +333,11 @@ final class TaskEngine {
 				outcome = TaskOutcome.TIMED_OUT;
 			double created = s.request.createdAt();
 			out.add(new TaskRecord(s.request.id(), s.request.device().name(), s.request.workload(), created,
-					s.request.deadline(), outcome, s.executedOn == null ? "" : s.executedOn.decl().name(),
+					s.request.deadline(), outcome, s.executed == null ? "" : s.executed.main().decl().name(),
 					s.completedAt, s.attempts, world.faultLog().partitionActive(created),
-					world.faultLog().faultActive(created)));
+					world.faultLog().faultActive(created),
+					s.executed == null ? List.of()
+							: s.executed.parts.stream().map(p -> p.target.decl().name()).toList()));
 		}
 		return out;
 	}

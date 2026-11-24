@@ -21,7 +21,7 @@ import zip.hedlund.pureedgesim.edgesdk.metrics.Metrics;
  * resources through the Repository, deploys the component on the best node and
  * migrates it when that node stops answering.
  */
-public final class Story9Flocky {
+public final class Story10Flocky {
 
 	static Flocky flocky(QoeEvaluator evaluator) {
 		return new Flocky().component(Component.of("video").prefers("green"))
@@ -47,6 +47,6 @@ public final class Story9Flocky {
 						Metrics.CONTROL_OVERHEAD, Metrics.TIME_TO_RECOVER,
 						Metrics.custom("flocky.migrations", Direction.LOWER_IS_BETTER),
 						Metrics.custom("flocky.known_nodes.mean"))
-				.run(Examples.output("story9"));
+				.run(Examples.output("story10"));
 	}
 }

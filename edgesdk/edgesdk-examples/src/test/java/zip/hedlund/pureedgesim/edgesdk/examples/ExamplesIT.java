@@ -84,7 +84,13 @@ class ExamplesIT {
 
 	@Test
 	void story9() {
-		Story9Flocky.main(new String[0]);
+		Story9MvtoraPostDisasterRescue.main(new String[0]);
 		ran("story9");
+	}
+
+	@Test
+	void story10() {
+		Story10Flocky.main(new String[0]);
+		ran("story10");
 	}
 }
