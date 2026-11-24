@@ -1,9 +1,13 @@
 package zip.hedlund.pureedgesim.edgesdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -11,6 +15,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import zip.hedlund.pureedgesim.edgesdk.algorithm.SdkContext;
 import zip.hedlund.pureedgesim.edgesdk.algorithm.policies.flocky.Component;
 import zip.hedlund.pureedgesim.edgesdk.algorithm.policies.flocky.ComponentDefinition;
 import zip.hedlund.pureedgesim.edgesdk.algorithm.policies.flocky.Flocky;
@@ -110,6 +115,7 @@ class FlockyIT {
 	@Test
 	void rejectsTasksThatHaveNoDeployment(@TempDir Path out) {
 		RunResult r = run(() -> new Flocky().deploymentNodes(t -> Set.of()).rejectWithoutDeployment(), null, out);
+		assertFalse(r.data().tasks().isEmpty());
 		assertTrue(r.data().tasks().stream().allMatch(t -> t.outcome() == TaskOutcome.REJECTED));
 		assertEquals(0, r.value(Metrics.TASK_SUCCESS), 1e-9);
 	}
@@ -117,12 +123,27 @@ class FlockyIT {
 	@Test
 	void aCrashedClientsLeaseExpiresAndFreesItsReservation(@TempDir Path out) {
 		// pa-0 deploys x on edge-a, then crash-stops without undeploying
-		RunResult r = run(() -> new Flocky().definition(ComponentDefinition.of("x-impl", "x", 10, 64))
+		Map<String, Set<NodeRef>> beforeCrash = new HashMap<>();
+		RunResult r = run(() -> new Flocky() {
+			@Override
+			public void onStart(SdkContext ctx) {
+				super.onStart(ctx);
+				ctx.schedule(EDGE_A, 35, () -> beforeCrash.putAll(hosted(EDGE_A)));
+			}
+		}.definition(ComponentDefinition.of("x-impl", "x", 10, 64)).deploymentNodes(Select.name("edge-a"))
 				.application(Select.name("pa-0"), "x"), "40s crash pa-0", out);
+		assertEquals(Set.of(PA0), beforeCrash.get("x-impl"), beforeCrash.toString());
 		var custom = r.data().custom();
 		assertTrue(custom.getOrDefault("flocky.leases_expired", 0.0) > 0, custom.toString());
-		assertTrue(flocky.hosted(EDGE_A).keySet().stream().noneMatch(d -> d.equals("x-impl")),
-				flocky.hosted(EDGE_A).toString());
+		assertFalse(flocky.hosted(EDGE_A).containsKey("x-impl"), flocky.hosted(EDGE_A).toString());
+	}
+
+	@Test
+	void aLeaseMustOutlastTheSwirlyPeriod(@TempDir Path out) {
+		assertThrows(IllegalArgumentException.class, () -> new Flocky().lease(0));
+		var scenario = TestScenarios.twoRegions(1).build();
+		assertThrows(Exception.class,
+				() -> scenario.run(Candidate.of("flocky", () -> new Flocky().lease(2)), out));
 	}
 
 	@Test

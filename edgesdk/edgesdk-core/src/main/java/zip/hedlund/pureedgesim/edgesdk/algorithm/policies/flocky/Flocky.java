@@ -215,9 +215,12 @@ public class Flocky extends OrchestrationPolicy {
 
 	/**
 	 * How long a host keeps a client that stopped renewing; three Swirly periods
-	 * by default.
+	 * by default. It must be longer than the Swirly period, at which clients
+	 * renew, or leases would expire between renewals.
 	 */
 	public Flocky lease(double seconds) {
+		if (!(seconds > 0))
+			throw new IllegalArgumentException("lease must be positive, was " + seconds);
 		this.lease = seconds;
 		return this;
 	}
@@ -262,6 +265,9 @@ public class Flocky extends OrchestrationPolicy {
 		for (ComponentDefinition d : definitions.values())
 			for (NodeRef n : knownBy.get(d.name()).resolve(topology))
 				bootDefinitions.get(n).add(d);
+		if (!(leaseTime() > swirlyPeriod))
+			throw new IllegalArgumentException(
+					"lease (" + leaseTime() + " s) must be longer than the Swirly period (" + swirlyPeriod + " s)");
 		deployers.addAll(deploymentNodes.resolve(topology));
 		state = ctx.nodeLocal(n -> {
 			NodeState s = new NodeState();
@@ -405,8 +411,10 @@ public class Flocky extends OrchestrationPolicy {
 				.thenComparing(o -> -score.get(o)).thenComparing(o -> o.node().node())
 				.thenComparing(o -> o.definition().name()));
 		if (options.isEmpty()) {
-			// nothing to ask yet (no metadata or no definition): not a failed deployment
 			s.orchestrating.remove(c);
+			// with no metadata or no definition yet there is nothing to ask, which is not a failure
+			if (!s.metadata.isEmpty() && !defs.isEmpty())
+				failed(s, c);
 			return;
 		}
 		tryDeploy(at, c, options, 0);
@@ -416,8 +424,7 @@ public class Flocky extends OrchestrationPolicy {
 		NodeState s = state.at(at);
 		if (i >= options.size()) {
 			s.orchestrating.remove(c);
-			if (s.failing.add(c))
-				ctx.metrics().add("flocky.deploy_failures", 1);
+			failed(s, c);
 			return;
 		}
 		QoeEvaluator.Option o = options.get(i);
@@ -432,6 +439,12 @@ public class Flocky extends OrchestrationPolicy {
 					} else
 						tryDeploy(at, c, options, i + 1);
 				}, () -> tryDeploy(at, c, options, i + 1));
+	}
+
+	/** Counts a failed deployment of a component once, until one succeeds. */
+	private void failed(NodeState s, String c) {
+		if (s.failing.add(c))
+			ctx.metrics().add("flocky.deploy_failures", 1);
 	}
 
 	private void drop(NodeRef at, String c) {
@@ -472,9 +485,12 @@ public class Flocky extends OrchestrationPolicy {
 		NodeState s = state.at(at);
 		for (String def : List.copyOf(s.clients.keySet())) {
 			Map<NodeRef, Double> c = s.clients.get(def);
-			if (c.values().removeIf(expiry -> expiry < ctx.now()) && c.isEmpty()) {
-				release(at, def);
-				ctx.metrics().add("flocky.leases_expired", 1);
+			int before = c.size();
+			c.values().removeIf(expiry -> expiry < ctx.now());
+			if (c.size() < before) {
+				ctx.metrics().add("flocky.leases_expired", before - c.size());
+				if (c.isEmpty())
+					release(at, def);
 			}
 		}
 	}
