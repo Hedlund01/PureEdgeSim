@@ -26,6 +26,7 @@ public record TaskRecord(long id, String device, String workload, double created
 		boolean duringFault, List<String> parts) {
 
 	public TaskRecord {
+		executedOn = executedOn == null ? "" : executedOn;
 		parts = parts != null ? List.copyOf(parts) : executedOn.isEmpty() ? List.of() : List.of(executedOn);
 	}
 

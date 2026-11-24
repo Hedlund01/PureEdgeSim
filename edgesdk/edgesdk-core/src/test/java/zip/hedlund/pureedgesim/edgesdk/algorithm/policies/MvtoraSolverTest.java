@@ -94,6 +94,15 @@ class MvtoraSolverTest {
 	}
 
 	@Test
+	void smallSharesAreGivenToTheOtherVehicles() {
+		double[] lambda = MvtoraSolver.dropSmallShares(new double[] { 0.6, 0.01, 0.385, 0.005 }, 0.02);
+		assertArrayEquals(new double[] { 0.6 / 0.985, 0, 0.385 / 0.985, 0 }, lambda, 1e-12);
+		// the largest share stays even when every share is small
+		assertArrayEquals(new double[] { 1, 0 }, MvtoraSolver.dropSmallShares(new double[] { 0.015, 0.01 }, 0.5),
+				1e-12);
+	}
+
+	@Test
 	void aSingleVehicleTakesTheWholeTask() {
 		assertArrayEquals(new double[] { 1 },
 				MvtoraSolver.divide(P, 2, new double[] { 1 }, new double[] { 0 }, new double[] { 0 }, new Random()));

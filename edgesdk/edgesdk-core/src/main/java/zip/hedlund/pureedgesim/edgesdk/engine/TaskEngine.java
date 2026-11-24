@@ -66,7 +66,8 @@ final class TaskEngine {
 		}
 
 		long scale(long bytes) {
-			return share == 1 ? bytes : Math.round(bytes * share);
+			// a part of a non-empty transfer carries at least a byte
+			return share == 1 || bytes == 0 ? bytes : Math.max(1, Math.round(bytes * share));
 		}
 	}
 

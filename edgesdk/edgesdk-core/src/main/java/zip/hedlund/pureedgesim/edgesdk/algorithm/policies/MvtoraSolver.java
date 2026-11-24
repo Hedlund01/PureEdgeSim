@@ -233,6 +233,22 @@ final class MvtoraSolver {
 		return best.clone();
 	}
 
+	/**
+	 * Sets the shares below {@code min} to zero and renormalises the others; the
+	 * largest share is always kept.
+	 */
+	static double[] dropSmallShares(double[] lambda, double min) {
+		double[] out = lambda.clone();
+		int largest = 0;
+		for (int j = 1; j < out.length; j++)
+			if (out[j] > out[largest])
+				largest = j;
+		for (int j = 0; j < out.length; j++)
+			if (j != largest && out[j] < min)
+				out[j] = 0;
+		return normalise(out);
+	}
+
 	private static double[] normalise(double[] x) {
 		double s = sum(x);
 		for (int j = 0; j < x.length; j++)

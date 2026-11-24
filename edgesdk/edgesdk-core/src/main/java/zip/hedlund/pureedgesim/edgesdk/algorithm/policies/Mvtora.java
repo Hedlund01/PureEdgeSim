@@ -178,6 +178,12 @@ public class Mvtora extends OrchestrationPolicy {
 	private static final long REPORT_BYTES = 64;
 	private static final long HEADER_BYTES = 64;
 	private static final long ENTRY_BYTES = 40;
+	/**
+	 * VFC shares below this are given to the other vehicles: the genetic algorithm
+	 * never yields a zero share, and every part is one more transfer that can be
+	 * lost, and a lost part fails the whole task.
+	 */
+	static final double MIN_SHARE = 0.02;
 
 	private final Params params;
 	private final Select mecSelect;
@@ -194,7 +200,7 @@ public class Mvtora extends OrchestrationPolicy {
 	private NodeLocal<DeviceState> deviceStates;
 
 	/** The device's latest slot information and the decisions it made since. */
-	private static final class DeviceState {
+	static final class DeviceState {
 		SlotInfo latest;
 		final List<Use> sent = new ArrayList<>();
 	}
@@ -285,22 +291,9 @@ public class Mvtora extends OrchestrationPolicy {
 		double now = ctx.now();
 		double stale = params.slot() * params.staleSlots();
 		Set<Use> uses = serving.at(server);
-		// A MEC task ends at its predicted completion, unless the server still holds
-		// more tasks than that leaves (a queue the prediction missed): then the
-		// latest-ending ones are kept for another slot.
 		LocalView me = ctx.local(server);
 		int held = me.busyCores() + me.queuedTasks();
-		List<Use> mine = new ArrayList<>();
-		for (Use u : uses)
-			if (u.node().equals(server))
-				mine.add(u);
-		mine.sort(Comparator.comparingDouble(Use::until).reversed());
-		uses.removeIf(u -> u.until() <= now);
-		for (int i = 0; i < Math.min(held, mine.size()); i++) {
-			Use u = mine.get(i);
-			if (u.until() <= now)
-				uses.add(new Use(u.task(), u.node(), u.work(), u.headroom(), u.since(), now + params.slot()));
-		}
+		expire(uses, server, held, now, params.slot());
 		List<VehicleState> fresh = new ArrayList<>();
 		for (VehicleState v : vehicleStates.at(server).values())
 			if (now - v.at() <= stale)
@@ -311,6 +304,27 @@ public class Mvtora extends OrchestrationPolicy {
 		long bytes = HEADER_BYTES + ENTRY_BYTES * (fresh.size() + uses.size());
 		for (NodeRef device : devicesOf.getOrDefault(server, List.of()))
 			ctx.send(server, device, bytes, info);
+	}
+
+	/**
+	 * Drops the uses that have ended. A MEC task ends at its predicted completion,
+	 * unless the server still holds more tasks than that leaves (a queue the
+	 * prediction missed): then the latest-ending ones are kept for another slot.
+	 *
+	 * @param held the tasks the server runs or queues right now
+	 */
+	static void expire(Set<Use> uses, NodeRef server, int held, double now, double slot) {
+		List<Use> mine = new ArrayList<>();
+		for (Use u : uses)
+			if (u.node().equals(server))
+				mine.add(u);
+		mine.sort(Comparator.comparingDouble(Use::until).reversed());
+		uses.removeIf(u -> u.until() <= now);
+		for (int i = 0; i < Math.min(held, mine.size()); i++) {
+			Use u = mine.get(i);
+			if (u.until() <= now)
+				uses.add(new Use(u.task(), u.node(), u.work(), u.headroom(), u.since(), now + slot));
+		}
 	}
 
 	@Override
@@ -385,7 +399,7 @@ public class Mvtora extends OrchestrationPolicy {
 	 * without them they would all offload while the server looks idle, then all
 	 * stay away while it looks full.
 	 */
-	private static int unseenMecTasks(SlotInfo info, DeviceState d, NodeRef server, double now) {
+	static int unseenMecTasks(SlotInfo info, DeviceState d, NodeRef server, double now) {
 		int listed = 0;
 		for (Use u : info.uses())
 			if (u.node().equals(server))
@@ -464,7 +478,8 @@ public class Mvtora extends OrchestrationPolicy {
 			jp[i] = joulesPerShare[picked[i]];
 		}
 		// Algorithm 4
-		double[] lambda = MvtoraSolver.divide(params, tMax, ps, fx, jp, ctx.rng());
+		double[] lambda = MvtoraSolver.dropSmallShares(MvtoraSolver.divide(params, tMax, ps, fx, jp, ctx.rng()),
+				MIN_SHARE);
 		double delay = MvtoraSolver.divisionDelay(lambda, ps, fx);
 		double joules = 0;
 		Map<NodeRef, Double> shares = new LinkedHashMap<>();

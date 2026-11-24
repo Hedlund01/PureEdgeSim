@@ -14,6 +14,8 @@ import java.util.Set;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import zip.hedlund.pureedgesim.edgesdk.algorithm.OrchestrationPolicy;
 import zip.hedlund.pureedgesim.edgesdk.algorithm.Placement;
@@ -34,6 +36,7 @@ import zip.hedlund.pureedgesim.edgesdk.model.ComputeSpec;
 import zip.hedlund.pureedgesim.edgesdk.model.MobilitySpec;
 import zip.hedlund.pureedgesim.edgesdk.model.NodeRef;
 import zip.hedlund.pureedgesim.edgesdk.model.Tier;
+import zip.hedlund.pureedgesim.edgesdk.model.WorkloadSpec;
 import zip.hedlund.pureedgesim.edgesdk.presets.ChannelPresets;
 import zip.hedlund.pureedgesim.edgesdk.presets.DevicePresets;
 import zip.hedlund.pureedgesim.edgesdk.presets.EdgePresets;
@@ -73,13 +76,16 @@ class MvtoraIT {
 	}
 
 	private static Scenario twoEdges() {
+		return twoEdges(60, WorkloadPresets.VIDEO_ANALYTICS.withLengthMi(20_000).withDeadlineS(5));
+	}
+
+	private static Scenario twoEdges(double duration, WorkloadSpec workload) {
 		var phone = DevicePresets.SMARTPHONE.withMobility(MobilitySpec.STATIC);
-		return Scenario.builder("halves").duration(60).seed(1).map(1_000, 1_000)
+		return Scenario.builder("halves").duration(duration).seed(1).map(1_000, 1_000)
 				.addEdgeNode("e1", EdgePresets.ROADSIDE_SERVER, Layout.at(500, 500))
 				.addEdgeNode("e2", EdgePresets.ROADSIDE_SERVER, Layout.at(520, 500))
 				.addEndDevice("p", phone, Layout.at(510, 520))
-				.connect(Select.name("p"), Select.name("e*"), ChannelPresets.WIFI)
-				.withWorkload(WorkloadPresets.VIDEO_ANALYTICS.withLengthMi(20_000).withDeadlineS(5)).build();
+				.connect(Select.name("p"), Select.name("e*"), ChannelPresets.WIFI).withWorkload(workload).build();
 	}
 
 	@Test
@@ -163,6 +169,23 @@ class MvtoraIT {
 		assertTrue(!retrying.tried.isEmpty() && retrying.tried.stream().allMatch(n -> n.name().equals("e2")));
 	}
 
+	@Test
+	void aPartLostWhileItRunsLosesTheTask(@TempDir Path out) {
+		// each half takes 4 s on its node; e2 crashes at 60 s with halves running on it
+		Scenario s = twoEdges(120,
+				WorkloadPresets.VIDEO_ANALYTICS.withLengthMi(200_000).withDeadlineS(10).withRatePerMinute(60))
+				.withFaults(FaultScript.parse("60s crash e2\n"));
+		RunResult r = s.run(Candidate.of("halves", () -> new Split(ordered("e1", 0.5, "e2", 0.5), 0)), out);
+		// created more than 0.2 s before the crash: the input reached e2, which then crashed
+		List<TaskRecord> running = r.data().tasks().stream()
+				.filter(t -> t.createdAt() > 56.5 && t.createdAt() < 59.8).toList();
+		assertTrue(!running.isEmpty());
+		assertTrue(running.stream().allMatch(t -> t.outcome() == TaskOutcome.NODE_CRASHED), running.toString());
+		// earlier tasks finished on both nodes
+		assertTrue(r.data().tasks().stream().filter(t -> t.createdAt() < 50)
+				.allMatch(t -> t.outcome().succeeded() && t.split()));
+	}
+
 	/**
 	 * Three C-UAVs fly among four cars, three far from them; all reach the E-UAV
 	 * over 5G. The near ones can divide tasks among the cars.
@@ -221,11 +244,12 @@ class MvtoraIT {
 	 * EMC must offload everything and builds a queue; MTO sees the queue through
 	 * the E-UAV's reservations and keeps the excess local.
 	 */
-	@Test
-	void theEuavBacklogStopsOffloadingWhenItIsFull(@TempDir Path out) {
+	@ParameterizedTest
+	@ValueSource(longs = { 6, 7, 8 })
+	void theEuavBacklogStopsOffloadingWhenItIsFull(long seed, @TempDir Path out) {
 		var uav = DevicePresets.UAV.withMobility(MobilitySpec.STATIC);
 		var euav = EdgePresets.ROADSIDE_SERVER.withCompute(c -> ComputeSpec.of(2, 7_500));
-		var b = Scenario.builder("overload").duration(120).seed(6).map(2_000, 2_000)
+		var b = Scenario.builder("overload").duration(120).seed(seed).map(2_000, 2_000)
 				.addEdgeNode("euav", euav, Layout.at(1_000, 1_000));
 		for (int i = 0; i < 6; i++)
 			b.addEndDevice("uav-" + i, uav, Layout.at(900 + 30 * i, 950));
@@ -237,7 +261,7 @@ class MvtoraIT {
 		double emcOk = successPct(emc);
 		double mtoOk = successPct(mto);
 		assertTrue(emcOk < 80, "emc " + emcOk);
-		// 85 % before the devices counted the arrivals they cannot see yet; 96–98 % over seeds 6–10
+		// 85 % on seed 6 before the devices counted the arrivals they cannot see yet; 96–98 % over seeds 6–10
 		assertTrue(mtoOk > 93, "mto " + mtoOk);
 		long toEuav = mto.data().tasks().stream().filter(t -> t.executedOn().equals("euav")).count();
 		assertTrue(toEuav > 0 && toEuav < mto.data().tasks().size() * 0.8, "to euav " + toEuav);

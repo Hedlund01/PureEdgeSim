@@ -21,7 +21,7 @@ public record TaskReport(TaskRequest task, NodeRef executedOn, double completedA
 		List<NodeRef> parts) {
 
 	public TaskReport {
-		parts = parts != null ? List.copyOf(parts) : List.of(executedOn);
+		parts = parts != null ? List.copyOf(parts) : executedOn == null ? List.of() : List.of(executedOn);
 	}
 
 	/** A result of a task that was not split: its only part is {@code executedOn}. */
