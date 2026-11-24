@@ -53,13 +53,23 @@ final class TaskEngine {
 		boolean deadlinePassed;
 		/** The result arrived after the deadline event had already counted the task as failed. */
 		boolean late;
-		TaskOutcome lastLoss;
+		/**
+		 * The first loss of any attempt: the cause that made the task need a retry.
+		 * Later losses of retries (often a consequence, e.g. NO_ROUTE after the link
+		 * was lost) do not replace it.
+		 */
+		TaskOutcome firstLoss;
 		SdkNode executedOn;
 		double completedAt = Double.NaN;
 
 		State(TaskRequest request, WorkloadSpec workload) {
 			this.request = request;
 			this.workload = workload;
+		}
+
+		void lost(TaskOutcome cause) {
+			if (firstLoss == null)
+				firstLoss = cause;
 		}
 
 		boolean hasResult() {
@@ -146,12 +156,12 @@ final class TaskEngine {
 			return;
 		}
 		world.network().send(device, target, s.request.inputBytes(), Transfer.Kind.TASK_INPUT, t -> execute(a),
-				(t, reason) -> s.lastLoss = map(reason));
+				(t, reason) -> s.lost(map(reason)));
 	}
 
 	private void execute(Attempt a) {
 		if (!a.target.isUp()) {
-			a.state.lastLoss = TaskOutcome.NODE_CRASHED;
+			a.state.lost(TaskOutcome.NODE_CRASHED);
 			return;
 		}
 		SdkTask task = new SdkTask(nextCoreTaskId++, a);
@@ -181,8 +191,8 @@ final class TaskEngine {
 			if (device.epoch() == a.state.deviceEpoch)
 				resultArrived(a);
 			else
-				a.state.lastLoss = TaskOutcome.DEVICE_DOWN;
-		}, (t, reason) -> a.state.lastLoss = map(reason));
+				a.state.lost(TaskOutcome.DEVICE_DOWN);
+		}, (t, reason) -> a.state.lost(map(reason)));
 	}
 
 	private void resultArrived(Attempt a) {
@@ -219,7 +229,7 @@ final class TaskEngine {
 		Set<Attempt> running = executing.remove(node);
 		if (running != null)
 			for (Attempt a : running)
-				a.state.lastLoss = TaskOutcome.NODE_CRASHED;
+				a.state.lost(TaskOutcome.NODE_CRASHED);
 	}
 
 	private static TaskOutcome map(LossReason reason) {
@@ -261,8 +271,8 @@ final class TaskEngine {
 				outcome = TaskOutcome.DEVICE_DOWN;
 			else if (s.rejected)
 				outcome = TaskOutcome.REJECTED;
-			else if (s.lastLoss != null)
-				outcome = s.lastLoss;
+			else if (s.firstLoss != null)
+				outcome = s.firstLoss;
 			else
 				outcome = TaskOutcome.TIMED_OUT;
 			double created = s.request.createdAt();

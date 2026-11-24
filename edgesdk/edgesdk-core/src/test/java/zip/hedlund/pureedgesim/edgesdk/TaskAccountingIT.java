@@ -18,6 +18,7 @@ import zip.hedlund.pureedgesim.edgesdk.api.Layout;
 import zip.hedlund.pureedgesim.edgesdk.api.RunResult;
 import zip.hedlund.pureedgesim.edgesdk.api.Scenario;
 import zip.hedlund.pureedgesim.edgesdk.api.Select;
+import zip.hedlund.pureedgesim.edgesdk.fault.FaultScript;
 import zip.hedlund.pureedgesim.edgesdk.metrics.TaskOutcome;
 import zip.hedlund.pureedgesim.edgesdk.metrics.TaskRecord;
 import zip.hedlund.pureedgesim.edgesdk.metrics.TimelineSample;
@@ -27,6 +28,7 @@ import zip.hedlund.pureedgesim.edgesdk.model.Tier;
 import zip.hedlund.pureedgesim.edgesdk.presets.ChannelPresets;
 import zip.hedlund.pureedgesim.edgesdk.presets.CloudPresets;
 import zip.hedlund.pureedgesim.edgesdk.presets.DevicePresets;
+import zip.hedlund.pureedgesim.edgesdk.presets.EdgePresets;
 import zip.hedlund.pureedgesim.edgesdk.presets.WorkloadPresets;
 
 /** How tasks are counted: outcomes, timeline windows and failure causes agree. */
@@ -37,6 +39,19 @@ class TaskAccountingIT {
 		@Override
 		public Placement place(NodeRef device, TaskRequest task) {
 			return Placement.local();
+		}
+	}
+
+	/** Offloads to the edge and retries there every second until the deadline. */
+	static final class EdgeWithRetry extends OrchestrationPolicy {
+		@Override
+		public Placement place(NodeRef device, TaskRequest task) {
+			return Placement.on(NodeRef.of("edge")).withRetryAfter(1);
+		}
+
+		@Override
+		public Placement onAttemptTimedOut(NodeRef device, TaskRequest task, NodeRef tried, int attempt) {
+			return place(device, task);
 		}
 	}
 
@@ -60,5 +75,27 @@ class TaskAccountingIT {
 		assertEquals(ok, done);
 		assertEquals(tasks.size() - ok, failed);
 		assertTrue(tasks.stream().anyMatch(t -> t.outcome() == TaskOutcome.LATE));
+	}
+
+	@Test
+	void aRetriedTaskKeepsTheCauseOfItsFirstLoss(@TempDir Path out) {
+		// the 2 MB input of the task created at 18.75 s is on the link when it goes down;
+		// its retries then find no route
+		var phone = DevicePresets.SMARTPHONE.withMobility(MobilitySpec.STATIC);
+		Scenario s = Scenario.builder("retry").duration(60).seed(5).map(1_000, 1_000)
+				.addEdgeNode("edge", EdgePresets.ROADSIDE_SERVER, Layout.at(500, 500))
+				.addEndDevice("p", phone, Layout.near("edge", 30))
+				.connect("p", "edge", ChannelPresets.WIFI)
+				.withWorkload(WorkloadPresets.SENSOR_TELEMETRY.withRatePerMinute(30).withSizes(2_000_000, 200)
+						.withDeadlineS(8), Select.tier(Tier.END_DEVICE))
+				.withFaults(FaultScript.parse("18.8s linkdown p edge for 30s\n")).build();
+		RunResult r = s.run(Candidate.of("retry", EdgeWithRetry::new), out);
+		TaskRecord hit = r.data().tasks().stream().filter(t -> t.createdAt() > 18.7 && t.createdAt() < 18.8)
+				.findFirst().orElseThrow();
+		assertTrue(hit.attempts() > 1, "attempts " + hit.attempts());
+		assertEquals(TaskOutcome.LINK_LOST, hit.outcome());
+		// later tasks never got through at all
+		assertEquals(TaskOutcome.NO_ROUTE, r.data().tasks().stream().filter(t -> t.createdAt() > 22).findFirst()
+				.orElseThrow().outcome());
 	}
 }

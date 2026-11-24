@@ -8,7 +8,7 @@ package zip.hedlund.pureedgesim.edgesdk.metrics;
  * @param workload        workload name
  * @param createdAt       creation time
  * @param deadline        absolute deadline
- * @param outcome         final outcome (true reason for failures)
+ * @param outcome         final outcome (true reason for failures: the first loss of any attempt)
  * @param executedOn      node whose result arrived first, or empty
  * @param completedAt     when the first result arrived, or NaN
  * @param attempts        attempts made by the policy
