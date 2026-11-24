@@ -150,3 +150,21 @@ Example: [`Story8CompareAlgorithms`](../edgesdk/edgesdk-examples/src/main/java/z
 Four candidates (cloud-only, local-first, nearest, heartbeat fallback), each
 with a storage strategy, face a partition and a micro-DC crash over 5
 replications.
+
+## 9. Reproduce a published algorithm: MVTORA
+
+**As a researcher, I want to** run a published offloading algorithm and its
+baselines in the SDK, **so that** I can compare my own algorithm against it
+under faults and mobility the paper did not model.
+
+Acceptance criteria:
+
+- [x] `Mvtora` implements MVTORA (Sun et al., arXiv:2309.16709): the utility of local, MEC-assisted and VFC-assisted computing (Eq. 21), MEC allocation by bisection (Algorithm 2), vehicle selection (Algorithm 3), task division by a genetic algorithm (Algorithm 4), and the decision of Algorithm 5 with a better-response step of the offloading game (Algorithm 1) for each task.
+- [x] VFC-assisted offloading divides a task among several vehicles with `Placement.split`.
+- [x] The E-UAV learns vehicle states and offloading decisions through messages every slot; devices that stop hearing from it compute locally.
+- [x] Restricting the modes gives the paper's ELC, EMC, VTO and MTO baselines.
+
+Example: [`Story9MvtoraPostDisasterRescue`](../edgesdk/edgesdk-examples/src/main/java/zip/hedlund/pureedgesim/edgesdk/examples/Story9MvtoraPostDisasterRescue.java).
+Fifteen client UAVs, twenty rescue vehicles and an edge UAV; MVTORA is compared
+with ELC, EMC, VTO and MTO on the predicted utility, task success, latency and
+device energy.

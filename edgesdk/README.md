@@ -78,6 +78,10 @@ public class MyOffloading extends OrchestrationPolicy {
 }
 ```
 
+A placement can also divide a task into parts that run in parallel:
+`Placement.split(Map.of(carA, 0.6, carB, 0.4))` gives each node its share of
+the length, input and output, and the result is back when every part's is.
+
 An algorithm sees the design topology, its node's own state, its messages
 (`ctx.send`, `ctx.request` with a timeout), its timers and its task results.
 It never sees link state, partitions or crashes of other nodes. Storage
@@ -125,7 +129,7 @@ The console prints a table per condition (mean ± CI95, Δ against the baseline,
 | `model` | `NodeSpec`, `ChannelSpec`, `ComputeSpec`, `MemorySpec`, `EnergySpec`, `MobilitySpec`, `WorkloadSpec`, `LinkSpec`, `DesignTopology` |
 | `presets` | `DevicePresets`, `EdgePresets`, `CloudPresets`, `ChannelPresets`, `WorkloadPresets` (values: [docs/edgesdk-presets.md](../docs/edgesdk-presets.md)) |
 | `fault` | `FaultModel`, `FaultScheduler`, `Targets`, `StochasticFaultModel`, `FaultScript`/`ScriptedFaultModel`, `CompositeFaultModel`, `NoFaults`, `FaultLog` |
-| `algorithm` | `Algorithm`, `SdkContext`, `OrchestrationPolicy`, `Placement`, `NodeLocal`, `Deferred`, `Declaration`; `policies/` |
+| `algorithm` | `Algorithm`, `SdkContext`, `OrchestrationPolicy`, `Placement`, `NodeLocal`, `Deferred`, `Declaration`; `policies/` (`CloudOnly`, `LocalFirst`, `NearestByDesign`, `HeartbeatFallback`, `Mvtora`) |
 | `detect` | `HeartbeatDetector`, `PhiAccrualDetector`, `TimeoutTracker`, `MembershipView` |
 | `storage` | `StorageStrategy`, `StorageOps`, `StorageWorkload`, `VersionedValue`, `VectorClock`; `strategies/` |
 | `metrics` | `Metric`, `Metrics` (catalogue), `RunData`, `ComparisonReport`, `CsvExporter`, `ComparisonCharts` |
@@ -133,7 +137,7 @@ The console prints a table per condition (mean ± CI95, Δ against the baseline,
 
 ## User stories and examples
 
-See [docs/user-stories.md](../docs/user-stories.md): eight stories, each with
+See [docs/user-stories.md](../docs/user-stories.md): nine stories, each with
 acceptance criteria and a runnable example in `edgesdk-examples`.
 
 ## Things to know
