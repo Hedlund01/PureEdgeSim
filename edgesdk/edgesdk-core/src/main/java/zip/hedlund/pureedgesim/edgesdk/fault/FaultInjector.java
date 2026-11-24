@@ -26,6 +26,8 @@ public final class FaultInjector implements FaultScheduler {
 
 	private final SdkWorld world;
 	private final String source;
+	/** The open crash record of each node that is down. */
+	private final Map<SdkNode, Integer> downSince = new HashMap<>();
 
 	public FaultInjector(SdkWorld world, String source) {
 		this.world = world;
@@ -73,13 +75,22 @@ public final class FaultInjector implements FaultScheduler {
 				SdkNode node = world.node(ref);
 				if (node.isPermanentlyDown())
 					continue;
-				world.crash(node, !recovery.recovers());
-				int id = world.faultLog().open(recovery.recovers() ? FaultType.CRASH_RECOVERY : FaultType.CRASH_STOP,
-						ref.name(), source, world.now(), List.of(ref.name()), "");
-				if (recovery.recovers())
+				boolean permanent = !recovery.recovers();
+				Integer open = downSince.get(node);
+				world.crash(node, permanent);
+				// one record per down time: a crash of a node already down only extends it,
+				// unless it makes a recoverable outage permanent
+				if (open == null || permanent) {
+					if (open != null)
+						world.faultLog().close(open, world.now());
+					downSince.put(node, world.faultLog().open(permanent ? FaultType.CRASH_STOP
+							: FaultType.CRASH_RECOVERY, ref.name(), source, world.now(), List.of(ref.name()), ""));
+				}
+				if (!permanent)
 					world.after(recovery.after(), () -> {
 						world.recover(node);
-						world.faultLog().close(id, world.now());
+						if (node.isUp())
+							world.faultLog().close(downSince.remove(node), world.now());
 					});
 			}
 		});
