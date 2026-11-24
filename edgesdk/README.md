@@ -129,7 +129,7 @@ The console prints a table per condition (mean ± CI95, Δ against the baseline,
 | `model` | `NodeSpec`, `ChannelSpec`, `ComputeSpec`, `MemorySpec`, `EnergySpec`, `MobilitySpec`, `WorkloadSpec`, `LinkSpec`, `DesignTopology` |
 | `presets` | `DevicePresets`, `EdgePresets`, `CloudPresets`, `ChannelPresets`, `WorkloadPresets` (values: [docs/edgesdk-presets.md](../docs/edgesdk-presets.md)) |
 | `fault` | `FaultModel`, `FaultScheduler`, `Targets`, `StochasticFaultModel`, `FaultScript`/`ScriptedFaultModel`, `CompositeFaultModel`, `NoFaults`, `FaultLog` |
-| `algorithm` | `Algorithm`, `SdkContext`, `OrchestrationPolicy`, `Placement`, `NodeLocal`, `Deferred`, `Declaration`; `policies/` (`CloudOnly`, `LocalFirst`, `NearestByDesign`, `HeartbeatFallback`, `Mvtora`) |
+| `algorithm` | `Algorithm`, `SdkContext`, `OrchestrationPolicy`, `Placement`, `NodeLocal`, `Deferred`, `Declaration`; `policies/` (`CloudOnly`, `LocalFirst`, `NearestByDesign`, `HeartbeatFallback`, `Mvtora`; `policies/flocky`: the Flocky orchestrator) |
 | `detect` | `HeartbeatDetector`, `PhiAccrualDetector`, `TimeoutTracker`, `MembershipView` |
 | `storage` | `StorageStrategy`, `StorageOps`, `StorageWorkload`, `VersionedValue`, `VectorClock`; `strategies/` |
 | `metrics` | `Metric`, `Metrics` (catalogue), `RunData`, `ComparisonReport`, `CsvExporter`, `ComparisonCharts` |
@@ -137,7 +137,7 @@ The console prints a table per condition (mean ± CI95, Δ against the baseline,
 
 ## User stories and examples
 
-See [docs/user-stories.md](../docs/user-stories.md): nine stories, each with
+See [docs/user-stories.md](../docs/user-stories.md): ten stories, each with
 acceptance criteria and a runnable example in `edgesdk-examples`.
 
 ## Things to know

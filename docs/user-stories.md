@@ -168,3 +168,24 @@ Example: [`Story9MvtoraPostDisasterRescue`](../edgesdk/edgesdk-examples/src/main
 Fifteen client UAVs, twenty rescue vehicles and an edge UAV; MVTORA is compared
 with ELC, EMC, VTO and MTO on the predicted utility, task success, latency and
 device energy.
+
+## 10. Decentralized intent-based orchestration (Flocky)
+
+**As a developer, I want to** evaluate Flocky (Goethals et al., "Flocky:
+Decentralized Intent-Based Edge Orchestration Using Open Application Model",
+IEEE TSC 2026) against centralized-knowledge policies, **so that** I can see
+what discovering the neighbourhood and matching intents costs and gains
+under faults.
+
+Acceptance criteria:
+
+- [x] Every node runs the Discovery service (Algorithm 1 of the paper: depth-first exploration within a round-trip range, widened when the local density is low), the Repository (periodic `NodeSummary` fetches that also spread `ComponentDefinition`s) and, where selected, the Deployment service.
+- [x] Applications are OAM `Component`s with required and optional traits; each can have several `ComponentDefinition`s (resources, workload type, traits they provide). A task of workload `w` is a request to component `w`.
+- [x] Swirly matches definitions and nodes on workload type, traits and unreserved resources, reuses existing deployments first, ranks the rest with a `QoeEvaluator` (`LEGACY` by latency, or `scored()`), and asks nodes to deploy in turn.
+- [x] Deployments are re-checked and migrated when their node leaves the neighbourhood, loses the deployment (a reboot) or stops answering tasks.
+- [x] Hosts hold each client on a lease that the client renews every Swirly period, so a lost undeploy, a late deploy reply or a crashed client cannot keep resources reserved.
+- [x] Custom metrics: `flocky.deployments`, `flocky.migrations`, `flocky.deploy_failures` (once per failure streak of a component), `flocky.leases_expired`, `flocky.discovery_rounds`, `flocky.known_nodes`.
+
+Example: [`Story10Flocky`](../edgesdk/edgesdk-examples/src/main/java/zip/hedlund/pureedgesim/edgesdk/examples/Story10Flocky.java).
+Flocky with both evaluators against `NearestByDesign` and `HeartbeatFallback`
+while a district is partitioned and a roadside server crashes.
