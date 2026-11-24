@@ -32,6 +32,13 @@ If you are looking for the shortest path to a running simulation, read [Getting 
 4. [API reference](api-reference.md): the classes and methods you will call.
 5. [Example 26](../PureEdgeSim/examples/Example26/README.md) puts three of the extension points together for one scenario: an orchestrator that learns its placements, devices that defend their real-time traffic, and a simulation manager that injects the crash.
 
+### Path 2b: I want to test algorithms under faults and network partitions
+
+1. [Edge SDK quick start](../edgesdk/README.md): a fluent builder, presets, fault injection, and comparison of algorithms under identical conditions, built on PureEdgeSim without changing it.
+2. [Architecture analysis](architecture-analysis.md): how the SDK extends the core, and its limits.
+3. [User stories](user-stories.md): eight runnable examples, from a custom offloading algorithm to a replication strategy tested under partition.
+4. [Edge SDK presets](edgesdk-presets.md): default values of devices, edge nodes, clouds and channels.
+
 ### Path 3: I want to change how the simulated system works
 
 1. [Architecture](architecture.md): modules, dependencies, and event processing.

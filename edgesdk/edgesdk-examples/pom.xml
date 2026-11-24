@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>zip.hedlund</groupId>
+		<artifactId>edgesdk-parent</artifactId>
+		<version>0.1.0-SNAPSHOT</version>
+	</parent>
+
+	<artifactId>edgesdk-examples</artifactId>
+	<name>PureEdgeSim Edge SDK (examples)</name>
+
+	<dependencies>
+		<dependency>
+			<groupId>zip.hedlund</groupId>
+			<artifactId>edgesdk-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.junit.jupiter</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<!-- mvn -f edgesdk/pom.xml -pl edgesdk-examples -am install -DskipTests
+			     mvn -f edgesdk/pom.xml -pl edgesdk-examples exec:java -Dexec.mainClass=zip.hedlund.pureedgesim.edgesdk.examples.Story8CompareAlgorithms -->
+			<plugin>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>exec-maven-plugin</artifactId>
+			</plugin>
+		</plugins>
+	</build>
+</project>
