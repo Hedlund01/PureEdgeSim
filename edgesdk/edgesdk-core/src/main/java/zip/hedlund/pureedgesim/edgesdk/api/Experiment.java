@@ -136,6 +136,11 @@ public final class Experiment {
 		return this;
 	}
 
+	/** Run ids may name files: keep letters, digits, '.', '_' and '-', and map the rest to '_'. */
+	private static String fileSafe(String name) {
+		return name.replaceAll("[^A-Za-z0-9._-]", "_");
+	}
+
 	/** Runs the grid and writes the result files into {@code output}. */
 	public ExperimentResult run(Path output) {
 		if (candidates.isEmpty())
@@ -174,7 +179,8 @@ public final class Experiment {
 					long faultSeed = mix(s.seed(), rep, 2);
 					for (Candidate c : candidates) {
 						long algorithmSeed = mix(s.seed(), rep, 3 + c.name().hashCode());
-						String id = String.format(Locale.ROOT, "p%d-%s-r%d-%s", p, model.label(), rep, c.name());
+						String id = String.format(Locale.ROOT, "p%d-%s-r%d-%s", p, fileSafe(model.label()), rep,
+								fileSafe(c.name()));
 						RunSpec spec = new RunSpec(id, s, c, model.label(), paramSets.get(p), rep, workloadSeed,
 								faultSeed, algorithmSeed, core);
 						RunData data = Runner.run(spec, quiet);

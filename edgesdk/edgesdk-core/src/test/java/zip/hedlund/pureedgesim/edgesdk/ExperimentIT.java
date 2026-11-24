@@ -119,4 +119,16 @@ class ExperimentIT {
 				.charts(false).progress(false).run(out);
 		assertEquals(List.of("random-30", "random-60"), r.runs().stream().map(RunResult::condition).toList());
 	}
+
+	@Test
+	void runIdsAreSafeFileNames(@TempDir Path out) {
+		ExperimentResult r = Experiment.on(TestScenarios.twoRegions(1).duration(30).build())
+				.candidate(Candidate.of("my algo/v2", NearestByDesign::new))
+				.faultModels(StochasticFaultModel.links(60, 5).named("link flaps/5s")).charts(false).progress(false)
+				.run(out);
+		RunResult run = r.runs().get(0);
+		assertEquals("p0-link_flaps_5s-r0-my_algo_v2", run.data().runId());
+		assertEquals("my algo/v2", run.candidate());
+		assertEquals("link flaps/5s", run.condition());
+	}
 }
